@@ -1,0 +1,5 @@
+{
+  "name": "BubbleBot Schematics & Sim",
+  "description": "Interactive wiring diagram and control code generator for a Raspberry Pi powered smoke bubble machine.",
+  "requestFramePermissions": []
+}
