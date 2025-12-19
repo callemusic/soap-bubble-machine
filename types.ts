@@ -44,5 +44,5 @@ export const DEFAULT_CONFIG: SimulationConfig = {
   blowDuration: 3.0,
   closeDuration: 1.5,
   fanSpeed: 100,
-  fanEnabled: false, // Default to disabled for testing without fan
+  fanEnabled: true, // Fan is connected and enabled by default
 };

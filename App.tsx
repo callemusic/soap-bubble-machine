@@ -11,30 +11,48 @@ import { CircuitBoard, Globe, Zap } from 'lucide-react';
 const App: React.FC = () => {
   const [machineState, setMachineState] = useState<MachineState>(MachineState.IDLE);
   const [isRunning, setIsRunning] = useState(false);
-  const [piIp, setPiIp] = useState<string>(''); 
+  const [piIp, setPiIp] = useState<string>('192.168.2.108'); 
   const [config, setConfig] = useState<SimulationConfig>(DEFAULT_CONFIG);
   const [isSyncing, setIsSyncing] = useState(false);
   const [highlight, setHighlight] = useState<SystemHighlight>(null);
   const [isPiOnline, setIsPiOnline] = useState(false);
+  const [hardwarePowered, setHardwarePowered] = useState<boolean>(false); // Manual toggle - user sets when power is confirmed
+  const [fanRunning, setFanRunning] = useState<boolean>(false);
   
   const timeoutRef = useRef<any>(null);
 
-  // Heartbeat check for Pi
+  // Heartbeat check for Pi and fan status, sync state
   useEffect(() => {
     if (!piIp) {
       setIsPiOnline(false);
+      setFanRunning(false);
       return;
     }
     const interval = setInterval(async () => {
       try {
-        const res = await fetch(`http://${piIp}:5000/health`, { signal: AbortSignal.timeout(2000) });
+        const res = await fetch(`http://${piIp}:8080/health`, { signal: AbortSignal.timeout(2000) });
         setIsPiOnline(res.ok);
+        if (res.ok) {
+          const data = await res.json();
+          setFanRunning(data.fan_running || false);
+          // Sync machine state if available and not running auto sequence
+          if (data.current_position && !isRunning && data.current_position !== 'IDLE') {
+            // Only sync if it's a valid state
+            const validStates = ['DIP', 'OPEN', 'CLOSE', 'IDLE'];
+            if (validStates.includes(data.current_position)) {
+              setMachineState(data.current_position as MachineState);
+            }
+          }
+        } else {
+          setFanRunning(false);
+        }
       } catch {
         setIsPiOnline(false);
+        setFanRunning(false);
       }
     }, 5000);
     return () => clearInterval(interval);
-  }, [piIp]);
+  }, [piIp, isRunning]);
 
   const stopSimulation = () => {
     if (timeoutRef.current) {
@@ -49,15 +67,33 @@ const App: React.FC = () => {
   };
 
   const sendRemoteCommand = async (state: MachineState) => {
-    if (!piIp) return;
+    if (!piIp) return null;
     try {
-      await fetch(`http://${piIp}:5000/set_state`, {
+      const res = await fetch(`http://${piIp}:8080/set_state`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ state }),
       });
+      if (res.ok) {
+        try {
+          const data = await res.json();
+          // Update fan state if BLOW was toggled
+          if (state === MachineState.BLOW && data.fan_running !== undefined) {
+            setFanRunning(data.fan_running);
+          }
+          // Sync current position from server if provided
+          if (data.current_position && !isRunning) {
+            const validStates = ['DIP', 'OPEN', 'CLOSE', 'IDLE'];
+            if (validStates.includes(data.current_position)) {
+              setMachineState(data.current_position as MachineState);
+            }
+          }
+        } catch {}
+      }
+      return res;
     } catch (e) {
       console.error("Failed to send command to Pi:", e);
+      return null;
     }
   };
 
@@ -65,7 +101,7 @@ const App: React.FC = () => {
     if (!piIp) return;
     setIsSyncing(true);
     try {
-        await fetch(`http://${piIp}:5000/update_config`, {
+        await fetch(`http://${piIp}:8080/update_config`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(config),
@@ -117,12 +153,67 @@ const App: React.FC = () => {
     }
   };
 
-  const handleManualState = (state: MachineState) => {
-    stopSimulation();
+  const handleManualState = async (state: MachineState) => {
+    // Skip if already in this state (except BLOW which toggles)
+    if (state !== MachineState.BLOW && state === machineState) {
+      console.log(`Already in ${state} state - skipping`);
+      return;
+    }
+    
+    // For BLOW, don't stop simulation first - just toggle the fan
+    // For other states, stop the simulation first
+    if (state !== MachineState.BLOW) {
+      stopSimulation();
+    } else {
+      // Just stop the auto-sequence timer, but don't send IDLE
+      if (timeoutRef.current) {
+        clearTimeout(timeoutRef.current);
+      }
+      setIsRunning(false);
+    }
     setMachineState(state);
     if (piIp && isPiOnline) {
-      handleSyncConfig().then(() => sendRemoteCommand(state));
+      await handleSyncConfig();
+      await sendRemoteCommand(state);
     }
+  };
+
+  const handleDeployServer = async () => {
+    if (!piIp || !isPiOnline) {
+      alert('Pi must be online to deploy server');
+      return;
+    }
+
+    // Create file input
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = '.py';
+    input.onchange = async (e: any) => {
+      const file = e.target.files[0];
+      if (!file) return;
+
+      const reader = new FileReader();
+      reader.onload = async (event: any) => {
+        const code = event.target.result;
+        try {
+          const res = await fetch(`http://${piIp}:8080/upload_server`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ code }),
+          });
+          const data = await res.json();
+          if (data.success) {
+            alert('✅ Server code deployed! The server will need to be restarted manually on the Pi.');
+          } else {
+            alert(`❌ Deployment failed: ${data.error || 'Unknown error'}`);
+          }
+        } catch (error) {
+          alert(`❌ Failed to deploy: ${error}`);
+        }
+      };
+      reader.readAsText(file);
+    };
+    input.click();
   };
 
   return (
@@ -134,12 +225,21 @@ const App: React.FC = () => {
             <Zap className="text-purple-500 w-8 h-8" />
             BubbleBot Remote IDE
           </h1>
-          <div className="flex items-center gap-2 mt-1">
-             <span className="bg-purple-500/10 text-purple-400 px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-widest border border-purple-500/20">Phase 4: Remote Deployment</span>
-             <p className="text-slate-400 text-sm flex items-center gap-2">
-               <Globe size={14} className={isPiOnline ? "text-green-500 animate-pulse" : "text-slate-600"} />
-               {isPiOnline ? `Connected to Pi @ ${piIp}` : 'Awaiting Connection to Cursor / Pi'}
-             </p>
+          <div className="flex flex-col gap-2 mt-1">
+             <div className="flex items-center gap-2">
+               <span className="bg-purple-500/10 text-purple-400 px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-widest border border-purple-500/20">Phase 4: Remote Deployment</span>
+               <p className="text-slate-400 text-sm flex items-center gap-2">
+                 <Globe size={14} className={isPiOnline ? "text-green-500 animate-pulse" : "text-slate-600"} />
+                 {isPiOnline ? `Connected to Pi @ ${piIp}` : 'Awaiting Connection to Cursor / Pi'}
+               </p>
+             </div>
+             {isPiOnline && !hardwarePowered && (
+               <div className="flex items-center gap-2 px-3 py-2 bg-yellow-500/10 border border-yellow-500/30 rounded text-yellow-400 text-xs">
+                 <Zap size={14} className="text-yellow-400" />
+                 <span className="font-bold">NOTE:</span>
+                 <span>Hardware power not confirmed. Toggle "Hardware Powered" below when 24V PSU is connected.</span>
+               </div>
+             )}
           </div>
         </div>
       </header>
@@ -168,6 +268,10 @@ const App: React.FC = () => {
                 onSyncConfig={handleSyncConfig}
                 isSyncing={isSyncing}
                 isOnline={isPiOnline}
+                hardwarePowered={hardwarePowered}
+                setHardwarePowered={setHardwarePowered}
+                fanRunning={fanRunning}
+                onDeployServer={handleDeployServer}
               />
            </div>
 
