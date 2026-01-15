@@ -2,133 +2,85 @@
 import React, { useState, useEffect, useRef } from 'react';
 import Schematic from './components/Schematic';
 import ControlPanel from './components/ControlPanel';
-import CodeGenerator from './components/CodeGenerator';
-import PinoutGuide from './components/PinoutGuide';
-import { MachineState, DEFAULT_PINS, SimulationConfig, DEFAULT_CONFIG, SystemHighlight } from './types';
-import { CircuitBoard, Globe, Zap } from 'lucide-react';
+import { MachineState, DEFAULT_PINS, SimulationConfig, DEFAULT_CONFIG } from './types';
+import { Globe, Zap } from 'lucide-react';
 
 const App: React.FC = () => {
   const [machineState, setMachineState] = useState<MachineState>(MachineState.IDLE);
   const [isRunning, setIsRunning] = useState(false);
-  const [piIp, setPiIp] = useState<string>('192.168.2.108'); 
+  const [piIp, setPiIp] = useState<string>('192.168.0.99'); 
   const [config, setConfig] = useState<SimulationConfig>(DEFAULT_CONFIG);
   const [isSyncing, setIsSyncing] = useState(false);
-  const [highlight, setHighlight] = useState<SystemHighlight>(null);
   const [isPiOnline, setIsPiOnline] = useState(false);
-  const [hardwarePowered, setHardwarePowered] = useState<boolean>(false); // Manual toggle - user sets when power is confirmed
-  const [fanRunning, setFanRunning] = useState<boolean>(false);
+  const [smokeRunning, setSmokeRunning] = useState(false);
+  const [fanRunning, setFanRunning] = useState(false);
+  const [motorAPosition, setMotorAPosition] = useState<number>(0);
+  const [motorBPosition, setMotorBPosition] = useState<number>(0);
+  const [movementDuration, setMovementDuration] = useState<number>(0);
   
   const timeoutRef = useRef<any>(null);
-  const isRunningRef = useRef<boolean>(false);
-  const configRef = useRef<SimulationConfig>(config);
-  
-  // Keep config ref in sync with state (so sequence always uses latest values)
-  useEffect(() => {
-    configRef.current = config;
-    console.log('Config updated in ref:', config);
-  }, [config]);
 
-  // Heartbeat check for Pi and fan status, sync state
+  // Heartbeat check for Pi
   useEffect(() => {
     if (!piIp) {
       setIsPiOnline(false);
-      setFanRunning(false);
       return;
     }
     const interval = setInterval(async () => {
       try {
         const res = await fetch(`http://${piIp}:8080/health`, { signal: AbortSignal.timeout(2000) });
-        setIsPiOnline(res.ok);
         if (res.ok) {
           const data = await res.json();
+          setIsPiOnline(true);
+          setMotorAPosition(data.motor_a_position || 0);
+          setMotorBPosition(data.motor_b_position || 0);
           setFanRunning(data.fan_running || false);
-          // Sync machine state if available and not running auto sequence
-          if (data.current_position && !isRunning && data.current_position !== 'IDLE') {
-            // Only sync if it's a valid state
-            const validStates = ['DIP', 'OPEN', 'CLOSE', 'IDLE'];
-            if (validStates.includes(data.current_position)) {
-              setMachineState(data.current_position as MachineState);
-            }
-          }
         } else {
-          setFanRunning(false);
+          setIsPiOnline(false);
         }
       } catch {
         setIsPiOnline(false);
-        setFanRunning(false);
       }
     }, 5000);
     return () => clearInterval(interval);
-  }, [piIp, isRunning]);
+  }, [piIp]);
 
-  const stopSimulation = async () => {
-    // Set running flag to false immediately to stop sequence
-    isRunningRef.current = false;
-    setIsRunning(false);
-    
-    // Clear any pending timeout
+  const stopSimulation = () => {
     if (timeoutRef.current) {
       clearTimeout(timeoutRef.current);
-      timeoutRef.current = null;
     }
-    
-    // Move arms back to HOME/OPEN before stopping
-    if (piIp && isPiOnline) {
-      try {
-        // First return to home (movement is blocking on server, so response comes after movement completes)
-        const res = await fetch(`http://${piIp}:8080/return_home`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-        });
-        if (res.ok) {
-          // Movement is complete, now stop everything
-          await sendRemoteCommand(MachineState.IDLE);
-        }
-      } catch (e) {
-        console.error("Failed to return home:", e);
-        // Still send IDLE even if return home failed
-        sendRemoteCommand(MachineState.IDLE);
-      }
-    }
-    
+    setIsRunning(false);
     setMachineState(MachineState.IDLE);
+    
+    if (piIp && isPiOnline) {
+      sendRemoteCommand(MachineState.IDLE);
+    }
   };
 
-  const sendRemoteCommand = async (state: MachineState, isSequence: boolean = false) => {
-    if (!piIp) return null;
+  const sendRemoteCommand = async (state: MachineState) => {
+    if (!piIp) return;
     try {
-      const res = await fetch(`http://${piIp}:8080/set_state`, {
+      const response = await fetch(`http://${piIp}:8080/set_state`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ state, isSequence }),
+        body: JSON.stringify({ state }),
       });
-      if (res.ok) {
-        try {
-          const data = await res.json();
-          // Update fan state if BLOW was toggled
-          if (state === MachineState.BLOW && data.fan_running !== undefined) {
-            setFanRunning(data.fan_running);
-            console.log(`Fan toggled via BLOW: ${data.fan_running ? 'ON' : 'OFF'}`);
-          }
-          // Sync current position from server if provided
-          if (data.current_position && !isRunning) {
-            const validStates = ['DIP', 'OPEN', 'CLOSE', 'IDLE'];
-            if (validStates.includes(data.current_position)) {
-              setMachineState(data.current_position as MachineState);
-            }
-          }
-          // For movements, ensure we wait for the response to be fully processed
-          // The server sends response AFTER movement completes (blocking)
-          return res;
-        } catch (e) {
-          console.error("Failed to parse response:", e);
-          return res; // Still return res even if JSON parse fails
+      const data = await response.json();
+      // Update motor positions immediately if returned
+      if (data.success && data.motor_a_position !== undefined && data.motor_b_position !== undefined) {
+        setMotorAPosition(data.motor_a_position);
+        setMotorBPosition(data.motor_b_position);
+        // Update movement duration for 1:1 simulation
+        if (data.movement_duration !== undefined) {
+          setMovementDuration(data.movement_duration);
+        }
+        // Update fan running state
+        if (data.fan_running !== undefined) {
+          setFanRunning(data.fan_running);
         }
       }
-      return res;
     } catch (e) {
       console.error("Failed to send command to Pi:", e);
-      return null;
     }
   };
 
@@ -136,40 +88,16 @@ const App: React.FC = () => {
     if (!piIp) return;
     setIsSyncing(true);
     try {
-        // Prepare config for Pi - ensure we use correct property names
-        const configToSend: any = { ...config };
-        // Remove old property names if they exist
-        if ('fanEarlyStart' in configToSend) {
-            delete configToSend.fanEarlyStart;
-        }
-        if ('dipDuration' in configToSend) {
-            delete configToSend.dipDuration;
-        }
-        if ('liftDuration' in configToSend) {
-            delete configToSend.liftDuration;
-        }
-        if ('closeDuration' in configToSend) {
-            delete configToSend.closeDuration;
-        }
-        // Ensure new property names exist (migrate from old names if needed)
-        if (!('fanStartDelay' in configToSend)) {
-            configToSend.fanStartDelay = (config as any).fanEarlyStart || 0.0;
-        }
-        if (!('dipWait' in configToSend)) {
-            configToSend.dipWait = (config as any).dipDuration || 3.0;
-        }
-        if (!('openWait' in configToSend)) {
-            configToSend.openWait = (config as any).liftDuration || 4.0;
-        }
-        if (!('closeWait' in configToSend)) {
-            configToSend.closeWait = (config as any).closeDuration || 1.0;
-        }
-        
-        await fetch(`http://${piIp}:8080/update_config`, {
+        const response = await fetch(`http://${piIp}:8080/update_config`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(configToSend),
+            body: JSON.stringify(config),
         });
+        const data = await response.json();
+        // Update fan running state if returned
+        if (data.fan_running !== undefined) {
+          setFanRunning(data.fan_running);
+        }
     } catch (e) {
         console.error("Failed to sync config to Pi:", e);
     } finally {
@@ -177,263 +105,198 @@ const App: React.FC = () => {
     }
   };
 
-  const runSequenceStep = async (step: MachineState) => {
-    // Check if sequence was stopped - don't continue if stopped (use ref for current value)
-    if (!isRunningRef.current) {
-      console.log(`Sequence stopped, aborting ${step}`);
-      return;
+  const handleSmokeControl = async (action: 'start' | 'stop' | 'test') => {
+    if (!piIp || !isPiOnline) return;
+    try {
+      const response = await fetch(`http://${piIp}:8080/control_smoke`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action,
+          intensity: config.smokeIntensity,
+          duration: config.smokeDuration,
+        }),
+      });
+      const data = await response.json();
+      setSmokeRunning(data.smoke_running || false);
+    } catch (e) {
+      console.error("Failed to control smoke:", e);
     }
-    
-    setMachineState(step);
-    
-    // Get current config values from ref (always latest, avoids stale closures)
-    const currentConfig = configRef.current;
-    
-    let nextStep: MachineState = MachineState.IDLE;
-    let duration = 1000;
-
-    // For movements (DIP, OPEN, CLOSE), wait for movement to complete before starting wait timer
-    if (piIp && isPiOnline && (step === MachineState.DIP || step === MachineState.OPEN || step === MachineState.CLOSE)) {
-      // Send command and wait for response (movement completes before response)
-      const response = await sendRemoteCommand(step, true); // true = part of sequence
-      
-      // Check again if sequence was stopped during movement (use ref for current value)
-      if (!isRunningRef.current) {
-        console.log(`Sequence stopped during ${step} movement, aborting`);
-        return;
-      }
-      
-      if (!response || !response.ok) {
-        console.error(`Failed to execute ${step}, stopping sequence`);
-        isRunningRef.current = false;
-        setIsRunning(false);
-        return;
-      }
-      // Movement is now complete, wait timer will start below
-      console.log(`${step} movement complete, starting wait timer`);
-    } else if (piIp && isPiOnline) {
-      sendRemoteCommand(step, true); // true = part of sequence
-    }
-
-    // Check again before setting timeout
-    if (!isRunningRef.current) {
-      console.log(`Sequence stopped before setting timeout for ${step}, aborting`);
-      return;
-    }
-
-    // Read config values fresh for this step (to ensure we use latest values)
-    switch (step) {
-      case MachineState.DIP:
-        nextStep = MachineState.OPEN;
-        duration = currentConfig.dipWait * 1000;  // Wait AFTER movement completes
-        console.log(`DIP wait: ${currentConfig.dipWait}s (from config)`);
-        break;
-      case MachineState.OPEN:
-        nextStep = MachineState.CLOSE;  // Skip BLOW, go directly to CLOSE
-        duration = currentConfig.openWait * 1000;  // Wait AFTER movement completes
-        console.log(`OPEN wait: ${currentConfig.openWait}s (from config)`);
-        break;
-      case MachineState.CLOSE:
-        nextStep = MachineState.DIP; 
-        duration = currentConfig.closeWait * 1000;  // Wait AFTER movement completes
-        console.log(`CLOSE wait: ${currentConfig.closeWait}s (from config)`);
-        break;
-      case MachineState.BLOW:
-        // BLOW is no longer part of automatic sequence, only manual control
-        nextStep = MachineState.IDLE;
-        duration = 1000;
-        break;
-    }
-
-    // Final check before setting timeout
-    if (!isRunningRef.current) {
-      console.log(`Sequence stopped before timeout, aborting`);
-      return;
-    }
-
-    console.log(`Setting timeout for ${duration}ms (${duration/1000}s) before ${nextStep}`);
-    timeoutRef.current = setTimeout(() => {
-        // Check one more time before running next step (use ref for current value)
-        if (isRunningRef.current) {
-          runSequenceStep(nextStep);
-        } else {
-          console.log(`Sequence stopped, not running ${nextStep}`);
-        }
-    }, duration);
   };
 
-  const toggleRun = async () => {
+  const handleMotorStep = async (direction: 'up' | 'down' | 'left' | 'right' | 'both_forward' | 'both_backward' | 'motor_a_forward' | 'motor_a_backward' | 'motor_b_forward' | 'motor_b_backward', steps: number = 10) => {
+    if (!piIp || !isPiOnline) return;
+    try {
+      const response = await fetch(`http://${piIp}:8080/motor_step`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ direction, steps }),
+      });
+      const data = await response.json();
+      if (data.success && data.motor_a_position !== undefined && data.motor_b_position !== undefined) {
+        // Update positions immediately
+        setMotorAPosition(data.motor_a_position);
+        setMotorBPosition(data.motor_b_position);
+      }
+    } catch (e) {
+      console.error("Failed to step motor:", e);
+    }
+  };
+
+  const handleMotorContinuous = async (action: 'start' | 'stop', direction?: 'up' | 'down') => {
+    if (!piIp || !isPiOnline) return;
+    try {
+      const response = await fetch(`http://${piIp}:8080/motor_continuous`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action, direction }),
+      });
+      const data = await response.json();
+      // Update positions when stopping continuous movement
+      if (action === 'stop' && data.success && data.motor_a_position !== undefined && data.motor_b_position !== undefined) {
+        setMotorAPosition(data.motor_a_position);
+        setMotorBPosition(data.motor_b_position);
+      }
+    } catch (e) {
+      console.error("Failed to control continuous motor:", e);
+    }
+  };
+
+  const handleMotorHome = async () => {
+    if (!piIp || !isPiOnline) return;
+    try {
+      const response = await fetch(`http://${piIp}:8080/motor_home`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      const data = await response.json();
+      if (data.success) {
+        // Update local state immediately
+        setMotorAPosition(0);
+        setMotorBPosition(0);
+      }
+    } catch (e) {
+      console.error("Failed to calibrate motors:", e);
+    }
+  };
+
+  const handleSaveMotorPosition = async (state: 'DIP' | 'OPEN' | 'CLOSE') => {
+    if (!piIp || !isPiOnline) return;
+    try {
+      const response = await fetch(`http://${piIp}:8080/save_motor_position`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ state }),
+      });
+      const data = await response.json();
+      if (data.success && data.config) {
+        // Update config with saved positions
+        setConfig({
+          ...config,
+          motorADipPosition: data.config.motorADipPosition || config.motorADipPosition,
+          motorBDipPosition: data.config.motorBDipPosition || config.motorBDipPosition,
+          motorAOpenPosition: data.config.motorAOpenPosition || config.motorAOpenPosition,
+          motorBOpenPosition: data.config.motorBOpenPosition || config.motorBOpenPosition,
+          motorAClosePosition: data.config.motorAClosePosition || config.motorAClosePosition,
+          motorBClosePosition: data.config.motorBClosePosition || config.motorBClosePosition,
+        });
+      }
+    } catch (e) {
+      console.error("Failed to save motor position:", e);
+    }
+  };
+
+  const runSequenceStep = (step: MachineState) => {
+    setMachineState(step);
+    if (piIp && isPiOnline) sendRemoteCommand(step);
+
+    let nextStep: MachineState = MachineState.IDLE;
+    let waitDuration = 1000; // Wait time after movement completes
+
+    switch (step) {
+      case MachineState.OPEN:
+        // After OPEN, wait then go to CLOSE
+        nextStep = MachineState.CLOSE;
+        waitDuration = config.waitAfterOpen * 1000;
+        break;
+      case MachineState.CLOSE:
+        // After CLOSE, wait then go to DIP
+        nextStep = MachineState.DIP;
+        waitDuration = config.waitAfterClose * 1000;
+        break;
+      case MachineState.DIP:
+        // After DIP, wait then go to OPEN
+        nextStep = MachineState.OPEN;
+        waitDuration = config.waitAfterDip * 1000;
+        break;
+    }
+
+    // Calculate movement duration for the current step to add to wait time
+    const movementDuration = calculateMovementDuration(step);
+    const totalDuration = (movementDuration * 1000) + waitDuration;
+
+    timeoutRef.current = setTimeout(() => {
+        runSequenceStep(nextStep);
+    }, totalDuration);
+  };
+
+  const toggleRun = () => {
     if (isRunning) {
       stopSimulation();
     } else {
-      // Sync config to Pi before starting sequence to ensure fan speed is current
-      if (piIp && isPiOnline) {
-        await handleSyncConfig();
-      }
-      isRunningRef.current = true;
       setIsRunning(true);
-      runSequenceStep(MachineState.DIP);
+      // Start loop with OPEN state
+      runSequenceStep(MachineState.OPEN);
     }
   };
 
-  const [setups, setSetups] = useState<Record<string, any>>({});
-  const [setupName, setSetupName] = useState<string>('');
-
-  // Load setups from Pi
-  const loadSetups = async () => {
-    if (!piIp || !isPiOnline) return;
-    try {
-      const res = await fetch(`http://${piIp}:8080/list_setups`);
-      if (res.ok) {
-        const data = await res.json();
-        if (data.success && data.setups) {
-          setSetups(data.setups);
-        }
-      }
-    } catch (e) {
-      console.error("Failed to load setups:", e);
-    }
-  };
-
-  // Save current setup
-  const handleSaveSetup = async () => {
-    if (!setupName.trim() || !piIp || !isPiOnline) return;
-    try {
-      const res = await fetch(`http://${piIp}:8080/save_setup`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: setupName.trim() }),
-      });
-      if (res.ok) {
-        const data = await res.json();
-        if (data.success) {
-          setSetups(data.setups || {});
-          setSetupName('');
-          alert(`Setup "${setupName.trim()}" saved!`);
-        }
-      }
-    } catch (e) {
-      console.error("Failed to save setup:", e);
-    }
-  };
-
-  // Load a setup
-  const handleLoadSetup = async (name: string) => {
-    if (!piIp || !isPiOnline) return;
-    try {
-      const res = await fetch(`http://${piIp}:8080/load_setup`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name }),
-      });
-      if (res.ok) {
-        const data = await res.json();
-        if (data.success) {
-          alert(`Setup "${name}" loaded!`);
-          // Reload motor positions
-          window.location.reload(); // Simple refresh to reload positions
-        } else {
-          alert(`Failed to load setup: ${data.message || 'Unknown error'}`);
-        }
-      }
-    } catch (e) {
-      console.error("Failed to load setup:", e);
-    }
-  };
-
-  // Delete a setup
-  const handleDeleteSetup = async (name: string) => {
-    if (!piIp || !isPiOnline) return;
-    if (!confirm(`Delete setup "${name}"?`)) return;
-    try {
-      const res = await fetch(`http://${piIp}:8080/delete_setup`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name }),
-      });
-      if (res.ok) {
-        const data = await res.json();
-        if (data.success) {
-          setSetups(data.setups || {});
-        }
-      }
-    } catch (e) {
-      console.error("Failed to delete setup:", e);
-    }
-  };
-
-  // Load setups when Pi comes online
-  useEffect(() => {
-    if (isPiOnline && piIp) {
-      loadSetups();
-    }
-  }, [isPiOnline, piIp]);
-
-  const handleManualState = async (state: MachineState) => {
-    // Skip if already in this state (except BLOW which toggles)
-    if (state !== MachineState.BLOW && state === machineState) {
-      console.log(`Already in ${state} state - skipping`);
-      return;
+  const calculateMovementDuration = (state: MachineState): number => {
+    // Calculate duration based on current position and target position
+    // Each step takes 0.001s (high) + 0.001s (low) = 0.002s per step
+    const stepDelay = 0.002; // seconds per step
+    
+    let targetA = 0;
+    let targetB = 0;
+    
+    switch (state) {
+      case MachineState.DIP:
+        targetA = config.motorADipPosition || 200;
+        targetB = config.motorBDipPosition || -200;
+        break;
+      case MachineState.OPEN:
+      case MachineState.HOME:
+        targetA = 0;
+        targetB = 0;
+        break;
+      case MachineState.CLOSE:
+        targetA = config.motorAClosePosition || 200;
+        targetB = config.motorBClosePosition || -200;
+        break;
+      default:
+        return 0;
     }
     
-    // For BLOW, don't stop simulation first - just toggle the fan
-    // For other states, stop the simulation first
-    if (state !== MachineState.BLOW) {
-      stopSimulation();
-      setMachineState(state);
-    } else {
-      // For BLOW toggle: don't change machine state, just toggle fan
-      // Just stop the auto-sequence timer, but don't send IDLE
-      if (timeoutRef.current) {
-        clearTimeout(timeoutRef.current);
-      }
-      setIsRunning(false);
-      // Don't change machineState for BLOW - keep current state
-    }
+    const stepsA = Math.abs(targetA - motorAPosition);
+    const stepsB = Math.abs(targetB - motorBPosition);
+    const maxSteps = Math.max(stepsA, stepsB);
+    
+    return maxSteps * stepDelay;
+  };
+
+  const handleManualState = (state: MachineState) => {
+    stopSimulation();
+    
+    // Calculate and set duration immediately for 1:1 animation
+    const duration = calculateMovementDuration(state);
+    setMovementDuration(duration);
+    
+    // Set state immediately to start animation
+    setMachineState(state);
     
     if (piIp && isPiOnline) {
-      await handleSyncConfig();
-      // sendRemoteCommand already handles updating fanRunning for BLOW state
-      await sendRemoteCommand(state, false); // false = manual, not sequence
+      handleSyncConfig().then(() => sendRemoteCommand(state));
     }
-  };
-
-  const handleDeployServer = async () => {
-    if (!piIp || !isPiOnline) {
-      alert('Pi must be online to deploy server');
-      return;
-    }
-
-    // Create file input
-    const input = document.createElement('input');
-    input.type = 'file';
-    input.accept = '.py';
-    input.onchange = async (e: any) => {
-      const file = e.target.files[0];
-      if (!file) return;
-
-      const reader = new FileReader();
-      reader.onload = async (event: any) => {
-        const code = event.target.result;
-        try {
-          const res = await fetch(`http://${piIp}:8080/upload_server`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ code }),
-          });
-          const data = await res.json();
-          if (data.success) {
-            alert('✅ Server code deployed! The server will need to be restarted manually on the Pi.');
-          } else {
-            alert(`❌ Deployment failed: ${data.error || 'Unknown error'}`);
-          }
-        } catch (error) {
-          alert(`❌ Failed to deploy: ${error}`);
-        }
-      };
-      reader.readAsText(file);
-    };
-    input.click();
   };
 
   return (
@@ -445,21 +308,12 @@ const App: React.FC = () => {
             <Zap className="text-purple-500 w-8 h-8" />
             BubbleBot Remote IDE
           </h1>
-          <div className="flex flex-col gap-2 mt-1">
-             <div className="flex items-center gap-2">
-               <span className="bg-purple-500/10 text-purple-400 px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-widest border border-purple-500/20">Phase 4: Remote Deployment</span>
-               <p className="text-slate-400 text-sm flex items-center gap-2">
-                 <Globe size={14} className={isPiOnline ? "text-green-500 animate-pulse" : "text-slate-600"} />
-                 {isPiOnline ? `Connected to Pi @ ${piIp}` : 'Awaiting Connection to Cursor / Pi'}
-               </p>
-             </div>
-             {isPiOnline && !hardwarePowered && (
-               <div className="flex items-center gap-2 px-3 py-2 bg-yellow-500/10 border border-yellow-500/30 rounded text-yellow-400 text-xs">
-                 <Zap size={14} className="text-yellow-400" />
-                 <span className="font-bold">NOTE:</span>
-                 <span>Hardware power not confirmed. Toggle "Hardware Powered" below when 24V PSU is connected.</span>
-               </div>
-             )}
+          <div className="flex items-center gap-2 mt-1">
+             <span className="bg-purple-500/10 text-purple-400 px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-widest border border-purple-500/20">Phase 4: Remote Deployment</span>
+             <p className="text-slate-400 text-sm flex items-center gap-2">
+               <Globe size={14} className={isPiOnline ? "text-green-500 animate-pulse" : "text-slate-600"} />
+               {isPiOnline ? `Connected to Pi @ ${piIp}` : 'Awaiting Connection to Cursor / Pi'}
+             </p>
           </div>
         </div>
       </header>
@@ -468,7 +322,7 @@ const App: React.FC = () => {
         
         <div className="lg:col-span-8 flex flex-col h-[600px] lg:h-full min-h-0 bg-slate-900 rounded-xl border border-slate-800 shadow-2xl overflow-hidden relative">
           <div className="absolute inset-0">
-             <Schematic activeState={machineState} fanSpeed={config.fanSpeed} fanEnabled={config.fanEnabled} highlight={highlight} />
+             <Schematic activeState={machineState} fanSpeed={config.fanSpeed} fanEnabled={config.fanEnabled} fanRunning={fanRunning} highlight={null} motorAPosition={motorAPosition} motorBPosition={motorBPosition} movementDuration={movementDuration} />
           </div>
         </div>
 
@@ -488,25 +342,16 @@ const App: React.FC = () => {
                 onSyncConfig={handleSyncConfig}
                 isSyncing={isSyncing}
                 isOnline={isPiOnline}
-                hardwarePowered={hardwarePowered}
-                setHardwarePowered={setHardwarePowered}
+                smokeRunning={smokeRunning}
+                onSmokeControl={handleSmokeControl}
+                onMotorStep={handleMotorStep}
+                onMotorContinuous={handleMotorContinuous}
+                onMotorHome={handleMotorHome}
+                onSaveMotorPosition={handleSaveMotorPosition}
+                motorAPosition={motorAPosition}
+                motorBPosition={motorBPosition}
                 fanRunning={fanRunning}
-                onDeployServer={handleDeployServer}
-                setups={setups}
-                setupName={setupName}
-                setSetupName={setSetupName}
-                onSaveSetup={handleSaveSetup}
-                onLoadSetup={handleLoadSetup}
-                onDeleteSetup={handleDeleteSetup}
               />
-           </div>
-
-           <div className="flex-none min-h-[450px]">
-              <PinoutGuide pins={DEFAULT_PINS} onHighlight={setHighlight} />
-           </div>
-
-           <div className="flex-1 min-h-[400px]">
-              <CodeGenerator pins={DEFAULT_PINS} config={config} piIp={piIp} />
            </div>
 
         </div>

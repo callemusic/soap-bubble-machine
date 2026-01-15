@@ -1,7 +1,7 @@
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useRef, useEffect } from 'react';
 import { MachineState, PinConfig, SimulationConfig } from '../types';
-import { Play, Square, RefreshCw, Wind, ArrowDownToLine, MoveVertical, ExternalLink, CloudFog, Wifi, Settings, Fan, UploadCloud, Activity, Zap, Rocket, ArrowLeft, ArrowRight, Home, Save, RotateCcw, FolderOpen, Trash2, FolderPlus } from 'lucide-react';
+import { Play, Square, RefreshCw, Wind, ArrowDownToLine, MoveVertical, ExternalLink, CloudFog, Wifi, Settings, Fan, UploadCloud, Activity, Cloud, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Home, Save } from 'lucide-react';
 
 interface ControlPanelProps {
   currentState: MachineState;
@@ -16,29 +16,15 @@ interface ControlPanelProps {
   onSyncConfig: () => void;
   isSyncing: boolean;
   isOnline: boolean;
-  hardwarePowered: boolean;
-  setHardwarePowered: (powered: boolean) => void;
-  fanRunning: boolean;
-  onDeployServer: () => void;
-  setups: Record<string, any>;
-  setupName: string;
-  setSetupName: (name: string) => void;
-  onSaveSetup: () => void;
-  onLoadSetup: (name: string) => void;
-  onDeleteSetup: (name: string) => void;
-}
-
-interface MotorPositions {
-  motorA: number;
-  motorB: number;
-  homeA: number;
-  homeB: number;
-  dipA?: number | null;
-  dipB?: number | null;
-  closeA?: number | null;
-  closeB?: number | null;
-  motorAEnabled?: boolean;
-  motorBEnabled?: boolean;
+  smokeRunning: boolean;
+  onSmokeControl: (action: 'start' | 'stop' | 'test') => void;
+  onMotorStep?: (direction: 'up' | 'down' | 'left' | 'right' | 'both_forward' | 'both_backward' | 'motor_a_forward' | 'motor_a_backward' | 'motor_b_forward' | 'motor_b_backward', steps?: number) => void;
+  onMotorContinuous?: (action: 'start' | 'stop', direction?: 'up' | 'down') => void;
+  onMotorHome?: () => void;
+  onSaveMotorPosition?: (state: 'DIP' | 'OPEN' | 'CLOSE') => void;
+  motorAPosition?: number;
+  motorBPosition?: number;
+  fanRunning?: boolean;
 }
 
 const ControlPanel: React.FC<ControlPanelProps> = ({ 
@@ -54,222 +40,16 @@ const ControlPanel: React.FC<ControlPanelProps> = ({
   onSyncConfig,
   isSyncing,
   isOnline,
-  hardwarePowered,
-  setHardwarePowered,
-  fanRunning,
-  onDeployServer,
-  setups,
-  setupName,
-  setSetupName,
-  onSaveSetup,
-  onLoadSetup,
-  onDeleteSetup
+  smokeRunning,
+  onSmokeControl,
+  onMotorStep,
+  onMotorContinuous,
+  onMotorHome,
+  onSaveMotorPosition,
+  motorAPosition = 0,
+  motorBPosition = 0,
+  fanRunning = false
 }) => {
-  const [motorPositions, setMotorPositions] = useState<MotorPositions>({ 
-    motorA: 0, 
-    motorB: 0, 
-    homeA: 0, 
-    homeB: 0,
-    motorAEnabled: true,
-    motorBEnabled: true
-  });
-  const [isTrimming, setIsTrimming] = useState(false);
-  const continuousTrimIntervalRef = useRef<NodeJS.Timeout | null>(null);
-  const continuousTrimParamsRef = useRef<{motor: 'A' | 'B', direction: 'forward' | 'backward', steps: number} | null>(null);
-  
-  // Load motor positions from health check
-  useEffect(() => {
-    if (isOnline && piIp) {
-      const loadPositions = async () => {
-        try {
-          const res = await fetch(`http://${piIp}:8080/get_motor_positions`);
-          if (res.ok) {
-            const data = await res.json();
-            if (data.positions) {
-              setMotorPositions(data.positions);
-            }
-          }
-        } catch (e) {
-          console.error("Failed to load motor positions:", e);
-        }
-      };
-      loadPositions();
-      const interval = setInterval(loadPositions, 2000);
-      return () => clearInterval(interval);
-    }
-  }, [isOnline, piIp]);
-  
-  const trimMotor = async (motor: 'A' | 'B', direction: 'forward' | 'backward', steps: number = 10, allowContinuous: boolean = false) => {
-    if (!isOnline) return;
-    // Only check isTrimming if not allowing continuous calls
-    if (!allowContinuous && isTrimming) return;
-    setIsTrimming(true);
-    try {
-      const res = await fetch(`http://${piIp}:8080/trim_motor`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ motor, direction, steps }),
-      });
-      if (res.ok) {
-        const data = await res.json();
-        if (data.positions) {
-          setMotorPositions(data.positions);
-        }
-      }
-    } catch (e) {
-      console.error("Failed to trim motor:", e);
-    } finally {
-      // Only clear isTrimming if not in continuous mode
-      if (!allowContinuous) {
-        setIsTrimming(false);
-      }
-    }
-  };
-
-  const startContinuousTrim = (motor: 'A' | 'B', direction: 'forward' | 'backward', steps: number) => {
-    if (!isOnline || isRunning || continuousTrimIntervalRef.current) return;
-    
-    // Stop any existing continuous trim
-    stopContinuousTrim();
-    
-    // Store params for the interval
-    continuousTrimParamsRef.current = { motor, direction, steps };
-    
-    // Start with immediate trim
-    trimMotor(motor, direction, steps, true);
-    
-    // Then continue trimming at regular intervals (every 100ms for smooth continuous movement)
-    continuousTrimIntervalRef.current = setInterval(() => {
-      if (continuousTrimParamsRef.current) {
-        trimMotor(
-          continuousTrimParamsRef.current.motor,
-          continuousTrimParamsRef.current.direction,
-          continuousTrimParamsRef.current.steps,
-          true
-        );
-      }
-    }, 100); // 100ms interval = 10 trims per second
-  };
-
-  const stopContinuousTrim = () => {
-    if (continuousTrimIntervalRef.current) {
-      clearInterval(continuousTrimIntervalRef.current);
-      continuousTrimIntervalRef.current = null;
-    }
-    continuousTrimParamsRef.current = null;
-    setIsTrimming(false);
-  };
-
-  // Cleanup on unmount
-  useEffect(() => {
-    return () => {
-      stopContinuousTrim();
-    };
-  }, []);
-  
-  const saveHome = async () => {
-    if (!isOnline) return;
-    try {
-      const res = await fetch(`http://${piIp}:8080/save_home`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-      });
-      if (res.ok) {
-        const data = await res.json();
-        if (data.positions) {
-          setMotorPositions(data.positions);
-        }
-        alert('✅ Home position saved!');
-      }
-    } catch (e) {
-      console.error("Failed to save home:", e);
-      alert('❌ Failed to save home position');
-    }
-  };
-  
-  const saveDip = async () => {
-    if (!isOnline) return;
-    try {
-      const res = await fetch(`http://${piIp}:8080/save_dip`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-      });
-      if (res.ok) {
-        const data = await res.json();
-        if (data.positions) {
-          setMotorPositions(data.positions);
-        }
-        alert('✅ DIP position saved!');
-      }
-    } catch (e) {
-      console.error("Failed to save DIP:", e);
-      alert('❌ Failed to save DIP position');
-    }
-  };
-  
-  const saveClose = async () => {
-    if (!isOnline) return;
-    try {
-      const res = await fetch(`http://${piIp}:8080/save_close`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-      });
-      if (res.ok) {
-        const data = await res.json();
-        if (data.positions) {
-          setMotorPositions(data.positions);
-        }
-        alert('✅ CLOSE position saved!');
-      }
-    } catch (e) {
-      console.error("Failed to save CLOSE:", e);
-      alert('❌ Failed to save CLOSE position');
-    }
-  };
-  
-  const returnToHome = async () => {
-    if (!isOnline || isTrimming) return;
-    setIsTrimming(true);
-    try {
-      const res = await fetch(`http://${piIp}:8080/return_home`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-      });
-      if (res.ok) {
-        const data = await res.json();
-        if (data.positions) {
-          setMotorPositions(data.positions);
-        }
-      }
-    } catch (e) {
-      console.error("Failed to return home:", e);
-    } finally {
-      setIsTrimming(false);
-    }
-  };
-  
-  const resetMotorPositions = async () => {
-    if (!isOnline) return;
-    if (!confirm('Reset motor positions to 0,0?\n\n⚠️ IMPORTANT: Physically align motors to 0,0 position FIRST, then click OK.\n\nThis sets the software position to match the physical position.')) {
-      return;
-    }
-    try {
-      const res = await fetch(`http://${piIp}:8080/reset_motor_positions`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-      });
-      if (res.ok) {
-        const data = await res.json();
-        if (data.positions) {
-          setMotorPositions(data.positions);
-        }
-        alert('✅ Motor positions reset to 0,0\n\nMotors should now be physically aligned to this position.');
-      }
-    } catch (e) {
-      console.error("Failed to reset positions:", e);
-      alert('❌ Failed to reset motor positions');
-    }
-  };
   
   const StateBadge = ({ state, active }: { state: string, active: boolean }) => (
     <div className={`px-3 py-1 rounded-full text-xs font-bold transition-all ${active ? 'bg-blue-500 text-white shadow-lg shadow-blue-500/50' : 'bg-slate-800 text-slate-500 border border-slate-700'}`}>
@@ -278,28 +58,59 @@ const ControlPanel: React.FC<ControlPanelProps> = ({
   );
 
   const handleConfigChange = async (key: keyof SimulationConfig, value: string | boolean) => {
+    const newConfig = { ...config };
     if (typeof value === 'boolean') {
-      setConfig({ ...config, [key]: value });
+      newConfig[key] = value;
     } else {
       const num = parseFloat(value);
       if (!isNaN(num)) {
-        const newConfig = { ...config, [key]: num };
-        setConfig(newConfig);
-        
-        // Auto-sync fan speed changes to Pi in real-time when fan is running
-        if (key === 'fanSpeed' && isOnline && fanRunning) {
-          try {
-            await fetch(`http://${piIp}:8080/update_config`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ fanSpeed: num }),
-            });
-          } catch (e) {
-            console.error("Failed to update fan speed:", e);
-          }
-        }
+        newConfig[key] = num;
       }
     }
+    setConfig(newConfig);
+    
+    // Sync critical config changes immediately to server
+    if (isOnline && piIp) {
+      try {
+        if (key === 'fanSpeed' && fanRunning) {
+          // Fan speed changed and fan is running - update immediately
+          await fetch(`http://${piIp}:8080/update_config`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ fanSpeed: newConfig.fanSpeed }),
+          });
+        } else if (key === 'fanEnabled') {
+          // Fan enabled/disabled - sync immediately so BLOW button works
+          await fetch(`http://${piIp}:8080/update_config`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ fanEnabled: newConfig.fanEnabled }),
+          });
+        }
+      } catch (e) {
+        console.error(`Failed to update ${key}:`, e);
+      }
+    }
+  };
+
+  // Clean up on unmount
+  useEffect(() => {
+    return () => {
+      // Stop continuous movement when component unmounts
+      if (onMotorContinuous) {
+        onMotorContinuous('stop');
+      }
+    };
+  }, [onMotorContinuous]);
+
+  const startContinuousStep = (direction: 'up' | 'down') => {
+    if (!onMotorContinuous || isRunning || !isOnline) return;
+    onMotorContinuous('start', direction);
+  };
+
+  const stopContinuousStep = () => {
+    if (!onMotorContinuous) return;
+    onMotorContinuous('stop');
   };
 
   return (
@@ -317,49 +128,18 @@ const ControlPanel: React.FC<ControlPanelProps> = ({
         
         {/* Connection Settings */}
         <div className="flex flex-col items-end gap-1">
-          <div className="flex items-center gap-2">
-            <button
-              onClick={onDeployServer}
-              disabled={!isOnline}
-              className="flex items-center gap-1.5 px-2 py-1 bg-purple-600 hover:bg-purple-500 rounded text-[10px] font-bold text-white uppercase tracking-wide transition-all disabled:opacity-40 disabled:bg-slate-700 disabled:cursor-not-allowed"
-              title="Deploy server_py2.py to Pi"
-            >
-              <Rocket size={12} />
-              Deploy Server
-            </button>
-            <div className={`flex items-center gap-2 px-2 py-1 rounded border transition-colors ${isOnline ? 'bg-green-500/10 border-green-500/30' : 'bg-slate-950 border-slate-800'}`}>
-               <Wifi size={14} className={isOnline ? "text-green-400" : "text-slate-600"} />
-               <input 
-                 type="text" 
-                 placeholder="Pi IP..." 
-                 value={piIp}
-                 onChange={(e) => setPiIp(e.target.value)}
-                 className="bg-transparent text-xs text-slate-300 w-24 outline-none placeholder-slate-700"
-               />
-            </div>
+          <div className={`flex items-center gap-2 px-2 py-1 rounded border transition-colors ${isOnline ? 'bg-green-500/10 border-green-500/30' : 'bg-slate-950 border-slate-800'}`}>
+             <Wifi size={14} className={isOnline ? "text-green-400" : "text-slate-600"} />
+             <input 
+               type="text" 
+               placeholder="Pi IP..." 
+               value={piIp}
+               onChange={(e) => setPiIp(e.target.value)}
+               className="bg-transparent text-xs text-slate-300 w-24 outline-none placeholder-slate-700"
+             />
           </div>
           {isOnline && <span className="text-[10px] text-green-500 font-bold animate-pulse">● HEARTBEAT OK</span>}
         </div>
-      </div>
-
-      {/* Hardware Power Toggle */}
-      <div className="flex items-center justify-between p-3 bg-slate-950 border border-slate-800 rounded-lg">
-        <div className="flex items-center gap-2">
-          <Zap size={16} className={hardwarePowered ? "text-green-400" : "text-yellow-400"} />
-          <div>
-            <div className="text-sm font-medium text-slate-200">Hardware Powered</div>
-            <div className="text-[10px] text-slate-500">Toggle when 24V PSU is connected</div>
-          </div>
-        </div>
-        <label className="relative inline-flex items-center cursor-pointer">
-          <input
-            type="checkbox"
-            checked={hardwarePowered}
-            onChange={(e) => setHardwarePowered(e.target.checked)}
-            className="sr-only peer"
-          />
-          <div className="w-11 h-6 bg-slate-700 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-green-500 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-green-600"></div>
-        </label>
       </div>
 
       {/* Main Controls */}
@@ -371,42 +151,237 @@ const ControlPanel: React.FC<ControlPanelProps> = ({
           {isRunning ? <><Square size={18} fill="currentColor" /> STOP SEQUENCE</> : <><Play size={18} fill="currentColor" /> START LOOP</>}
         </button>
 
+        {/* Loop Wait Times */}
+        <div className="col-span-2 space-y-3 mt-2 p-3 bg-slate-950 border border-slate-800 rounded">
+          <h4 className="text-xs font-semibold text-slate-400 uppercase tracking-tighter">Loop Wait Times</h4>
+          <div className="space-y-3">
+            <div>
+              <div className="flex justify-between text-xs text-slate-400 mb-1">
+                <span>Open → Close</span>
+                <span className="text-blue-400 font-mono">{config.waitAfterOpen}s</span>
+              </div>
+              <input 
+                type="range" 
+                min="0" 
+                max="10" 
+                step="0.1"
+                value={config.waitAfterOpen} 
+                onChange={(e) => handleConfigChange('waitAfterOpen', e.target.value)}
+                className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-blue-500"
+              />
+            </div>
+            
+            <div>
+              <div className="flex justify-between text-xs text-slate-400 mb-1">
+                <span>Close → Dip</span>
+                <span className="text-blue-400 font-mono">{config.waitAfterClose}s</span>
+              </div>
+              <input 
+                type="range" 
+                min="0" 
+                max="10" 
+                step="0.1"
+                value={config.waitAfterClose} 
+                onChange={(e) => handleConfigChange('waitAfterClose', e.target.value)}
+                className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-blue-500"
+              />
+            </div>
+            
+            <div>
+              <div className="flex justify-between text-xs text-slate-400 mb-1">
+                <span>Dip → Open</span>
+                <span className="text-blue-400 font-mono">{config.waitAfterDip}s</span>
+              </div>
+              <input 
+                type="range" 
+                min="0" 
+                max="10" 
+                step="0.1"
+                value={config.waitAfterDip} 
+                onChange={(e) => handleConfigChange('waitAfterDip', e.target.value)}
+                className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-blue-500"
+              />
+            </div>
+          </div>
+        </div>
+
         <div className="text-xs text-slate-500 col-span-2 text-center my-2 border-b border-slate-800 leading-[0.1em]">
           <span className="bg-slate-900 px-2 uppercase tracking-widest font-bold">Manual Overrides</span>
         </div>
 
-        <button 
-          disabled={isRunning}
-          onClick={() => onManualState(MachineState.DIP)}
-          className="p-3 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 disabled:cursor-not-allowed rounded text-slate-200 text-sm flex items-center justify-center gap-2 border border-slate-700 transition-all active:scale-95"
-        >
-          <ArrowDownToLine size={16} /> Dip (Soap)
-        </button>
+        <div className="col-span-2 flex items-center gap-2">
+          <button 
+            disabled={isRunning}
+            onClick={() => onManualState(MachineState.DIP)}
+            className="flex-1 p-3 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 disabled:cursor-not-allowed rounded text-slate-200 text-sm flex items-center justify-center gap-2 border border-slate-700 transition-all active:scale-95"
+          >
+            <ArrowDownToLine size={16} /> Dip (Soap)
+          </button>
+          {onSaveMotorPosition && (
+            <button
+              disabled={isRunning || !isOnline}
+              onClick={() => onSaveMotorPosition('DIP')}
+              className="p-2 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 disabled:cursor-not-allowed rounded text-white border border-emerald-700 transition-all active:scale-95"
+              title="Save current position as DIP target"
+            >
+              <Save size={14} />
+            </button>
+          )}
+        </div>
 
         <button 
           disabled={isRunning}
           onClick={() => onManualState(MachineState.BLOW)}
-          className={`p-3 ${fanRunning ? 'bg-blue-600 hover:bg-blue-500' : 'bg-slate-800 hover:bg-slate-700'} disabled:opacity-50 disabled:cursor-not-allowed rounded text-white text-sm flex items-center justify-center gap-2 border ${fanRunning ? 'border-blue-500' : 'border-slate-700'} transition-all active:scale-95`}
+          className="col-span-2 p-3 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 disabled:cursor-not-allowed rounded text-slate-200 text-sm flex items-center justify-center gap-2 border border-slate-700 transition-all active:scale-95"
         >
-          <Wind size={16} /> {fanRunning ? 'Stop Fan' : 'Blow'}
+          <Wind size={16} /> Blow
         </button>
 
-        <button 
-          disabled={isRunning}
-          onClick={() => onManualState(MachineState.CLOSE)}
-          className="p-3 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 disabled:cursor-not-allowed rounded text-slate-200 text-sm flex items-center justify-center gap-2 border border-slate-700 transition-all active:scale-95"
-        >
-          <MoveVertical size={16} /> Close Arms
-        </button>
+        <div className="col-span-2 flex items-center gap-2">
+          <button 
+            disabled={isRunning}
+            onClick={() => onManualState(MachineState.CLOSE)}
+            className="flex-1 p-3 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 disabled:cursor-not-allowed rounded text-slate-200 text-sm flex items-center justify-center gap-2 border border-slate-700 transition-all active:scale-95"
+          >
+            <MoveVertical size={16} /> Close Arms
+          </button>
+          {onSaveMotorPosition && (
+            <button
+              disabled={isRunning || !isOnline}
+              onClick={() => onSaveMotorPosition('CLOSE')}
+              className="p-2 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 disabled:cursor-not-allowed rounded text-white border border-emerald-700 transition-all active:scale-95"
+              title="Save current position as CLOSE target"
+            >
+              <Save size={14} />
+            </button>
+          )}
+        </div>
 
-        <button 
-          disabled={isRunning}
-          onClick={() => onManualState(MachineState.OPEN)}
-          className="p-3 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 disabled:cursor-not-allowed rounded text-slate-200 text-sm flex items-center justify-center gap-2 border border-slate-700 transition-all active:scale-95"
-        >
-          <ExternalLink size={16} /> Open Arms
-        </button>
+        <div className="col-span-2 flex items-center gap-2">
+          <button 
+            disabled={isRunning}
+            onClick={() => onManualState(MachineState.OPEN)}
+            className="flex-1 p-3 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 disabled:cursor-not-allowed rounded text-slate-200 text-sm flex items-center justify-center gap-2 border border-slate-700 transition-all active:scale-95"
+          >
+            <ExternalLink size={16} /> Open Arms (Home)
+          </button>
+          {onSaveMotorPosition && (
+            <button
+              disabled={isRunning || !isOnline}
+              onClick={() => onSaveMotorPosition('OPEN')}
+              className="p-2 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 disabled:cursor-not-allowed rounded text-white border border-emerald-700 transition-all active:scale-95"
+              title="Save current position as OPEN target"
+            >
+              <Save size={14} />
+            </button>
+          )}
+        </div>
       </div>
+
+      {/* Fine Motor Control - Arrow Keys */}
+      {onMotorStep && (
+        <div className="mt-3">
+          <div className="text-xs text-slate-500 text-center mb-2 border-b border-slate-800 leading-[0.1em]">
+            <span className="bg-slate-900 px-2 uppercase tracking-widest font-bold">Fine Motor Control</span>
+          </div>
+          
+          {/* Continuous movement - Both motors */}
+          <div className="flex justify-center gap-1 mb-3">
+            <button
+              disabled={isRunning || !isOnline}
+              onMouseDown={() => startContinuousStep('up')}
+              onMouseUp={stopContinuousStep}
+              onMouseLeave={stopContinuousStep}
+              onTouchStart={() => startContinuousStep('up')}
+              onTouchEnd={stopContinuousStep}
+              className="p-1.5 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 disabled:cursor-not-allowed rounded text-slate-200 border border-slate-700 transition-all active:scale-95 select-none"
+              title="Hold: Both motors up"
+            >
+              <ArrowUp size={16} />
+            </button>
+            <button
+              disabled={isRunning || !isOnline}
+              onMouseDown={() => startContinuousStep('down')}
+              onMouseUp={stopContinuousStep}
+              onMouseLeave={stopContinuousStep}
+              onTouchStart={() => startContinuousStep('down')}
+              onTouchEnd={stopContinuousStep}
+              className="p-1.5 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 disabled:cursor-not-allowed rounded text-slate-200 border border-slate-700 transition-all active:scale-95 select-none"
+              title="Hold: Both motors down"
+            >
+              <ArrowDown size={16} />
+            </button>
+          </div>
+          
+          {/* Calibrate/Home button */}
+          {onMotorHome && (
+            <div className="flex justify-center mb-3">
+              <button
+                disabled={isRunning || !isOnline}
+                onClick={onMotorHome}
+                className="px-3 py-1.5 bg-amber-600 hover:bg-amber-500 disabled:opacity-50 disabled:cursor-not-allowed rounded text-xs font-bold text-white flex items-center gap-1.5 transition-all active:scale-95 border border-amber-700"
+                title="Set current position as home (0, 0)"
+              >
+                <Home size={12} />
+                Set Home
+              </button>
+            </div>
+          )}
+          
+          {/* Individual motor controls */}
+          <div className="space-y-2">
+            {/* Motor A */}
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-[10px] text-slate-400 uppercase font-bold w-12">Motor A</span>
+              <div className="flex items-center gap-1 flex-1">
+                <button
+                  disabled={isRunning || !isOnline}
+                  onClick={() => onMotorStep('motor_a_backward', 5)}
+                  className="p-1.5 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 disabled:cursor-not-allowed rounded text-slate-200 border border-slate-700 transition-all active:scale-95"
+                  title="5 steps backward"
+                >
+                  <ArrowLeft size={14} />
+                </button>
+                <span className="text-[9px] text-slate-600 font-mono w-6 text-center">5</span>
+                <button
+                  disabled={isRunning || !isOnline}
+                  onClick={() => onMotorStep('motor_a_forward', 5)}
+                  className="p-1.5 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 disabled:cursor-not-allowed rounded text-slate-200 border border-slate-700 transition-all active:scale-95"
+                  title="5 steps forward"
+                >
+                  <ArrowRight size={14} />
+                </button>
+                <span className="text-[9px] text-blue-400 font-mono ml-1 min-w-[50px] text-right">Pos: {motorAPosition}</span>
+              </div>
+            </div>
+            
+            {/* Motor B */}
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-[10px] text-slate-400 uppercase font-bold w-12">Motor B</span>
+              <div className="flex items-center gap-1 flex-1">
+                <button
+                  disabled={isRunning || !isOnline}
+                  onClick={() => onMotorStep('motor_b_backward', 5)}
+                  className="p-1.5 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 disabled:cursor-not-allowed rounded text-slate-200 border border-slate-700 transition-all active:scale-95"
+                  title="5 steps backward"
+                >
+                  <ArrowLeft size={14} />
+                </button>
+                <span className="text-[9px] text-slate-600 font-mono w-6 text-center">5</span>
+                <button
+                  disabled={isRunning || !isOnline}
+                  onClick={() => onMotorStep('motor_b_forward', 5)}
+                  className="p-1.5 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 disabled:cursor-not-allowed rounded text-slate-200 border border-slate-700 transition-all active:scale-95"
+                  title="5 steps forward"
+                >
+                  <ArrowRight size={14} />
+                </button>
+                <span className="text-[9px] text-blue-400 font-mono ml-1 min-w-[50px] text-right">Pos: {motorBPosition}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Configuration Section */}
       <div className="mt-6 border-t border-slate-800 pt-4">
@@ -427,8 +402,13 @@ const ControlPanel: React.FC<ControlPanelProps> = ({
         <div className="space-y-4">
           <div className="flex items-center justify-between p-2 bg-slate-950 border border-slate-800 rounded">
             <div className="flex items-center gap-2">
-              <Fan size={14} className={config.fanEnabled ? "text-blue-400" : "text-slate-600"} />
+              <Fan size={14} className={fanRunning ? "text-blue-400 animate-pulse" : (config.fanEnabled ? "text-blue-600" : "text-slate-600")} />
               <span className="text-xs text-slate-300 font-medium">Fan Enabled</span>
+              {fanRunning && (
+                <span className="px-1.5 py-0.5 bg-blue-500/20 text-blue-400 text-[9px] font-bold rounded border border-blue-500/30 animate-pulse">
+                  BLOWING
+                </span>
+              )}
             </div>
             <label className="relative inline-flex items-center cursor-pointer">
               <input
@@ -443,9 +423,11 @@ const ControlPanel: React.FC<ControlPanelProps> = ({
           
           {config.fanEnabled && (
             <div>
-              <div className="flex justify-between text-xs text-slate-400 mb-1">
-                 <span className="flex items-center gap-1"><Fan size={12}/> Fan Power</span>
-                 <span className="text-blue-400 font-mono">{config.fanSpeed}%</span>
+              <div className="flex justify-between text-xs mb-1">
+                 <span className={`flex items-center gap-1 ${fanRunning ? 'text-blue-400 font-bold' : 'text-slate-400'}`}>
+                   <Fan size={12} className={fanRunning ? "animate-spin" : ""}/> Fan Power
+                 </span>
+                 <span className={`font-mono ${fanRunning ? 'text-blue-400 font-bold' : 'text-blue-400'}`}>{config.fanSpeed}%</span>
               </div>
               <input 
                 type="range" 
@@ -458,526 +440,75 @@ const ControlPanel: React.FC<ControlPanelProps> = ({
             </div>
           )}
 
-          <div className="grid grid-cols-2 gap-3">
-             <div className="space-y-1">
-                <label className="text-[10px] text-slate-500 uppercase tracking-tighter">DIP Wait (s)</label>
-                <input 
-                  type="number" 
-                  step="0.1"
-                  value={config.dipWait}
-                  onChange={(e) => handleConfigChange('dipWait', e.target.value)}
-                  className="bg-slate-950 border border-slate-800 rounded w-full py-1 px-2 text-sm text-slate-300 outline-none focus:border-blue-500"
-                  title="Seconds arms stay at DIP position after reaching it"
-                />
-             </div>
-             <div className="space-y-1">
-                <label className="text-[10px] text-slate-500 uppercase tracking-tighter">OPEN Wait (s)</label>
-                <input 
-                  type="number" 
-                  step="0.1"
-                  value={config.openWait}
-                  onChange={(e) => handleConfigChange('openWait', e.target.value)}
-                  className="bg-slate-950 border border-slate-800 rounded w-full py-1 px-2 text-sm text-slate-300 outline-none focus:border-blue-500"
-                  title="Seconds arms stay at OPEN position after reaching it"
-                />
-             </div>
-             <div className="space-y-1">
-                <label className="text-[10px] text-slate-500 uppercase tracking-tighter">CLOSE Wait (s)</label>
-                <input 
-                  type="number" 
-                  step="0.1"
-                  value={config.closeWait}
-                  onChange={(e) => handleConfigChange('closeWait', e.target.value)}
-                  className="bg-slate-950 border border-slate-800 rounded w-full py-1 px-2 text-sm text-slate-300 outline-none focus:border-blue-500"
-                  title="Seconds arms stay at CLOSE position after reaching it"
-                />
-             </div>
-             <div className="space-y-1">
-                <label className="text-[10px] text-slate-500 uppercase tracking-tighter">Fan Start Delay</label>
-                <input 
-                  type="number" 
-                  step="0.1"
-                  value={config.fanStartDelay}
-                  onChange={(e) => handleConfigChange('fanStartDelay', e.target.value)}
-                  className="bg-slate-950 border border-slate-800 rounded w-full py-1 px-2 text-sm text-slate-300 outline-none focus:border-blue-500"
-                  title="Seconds delay after DIP phase ends before fan starts"
-                />
-             </div>
-             <div className="space-y-1">
-                <label className="text-[10px] text-slate-500 uppercase tracking-tighter">Fan Duration</label>
-                <input 
-                  type="number" 
-                  step="0.1"
-                  value={config.fanDuration}
-                  onChange={(e) => handleConfigChange('fanDuration', e.target.value)}
-                  className="bg-slate-950 border border-slate-800 rounded w-full py-1 px-2 text-sm text-slate-300 outline-none focus:border-blue-500"
-                  title="Total seconds fan should run (independent of arm movement - fan continues during CLOSE)"
-                />
-             </div>
-          </div>
-        </div>
-      </div>
-
-      {/* Movement Speed Controls */}
-      <div className="mt-6 border-t border-slate-800 pt-4">
-        <div className="flex justify-between items-center mb-4">
-          <h3 className="text-sm font-semibold text-slate-300 flex items-center gap-2">
-            <Settings size={14} /> Movement Speed
-          </h3>
-        </div>
-        
-        <div className="space-y-4">
-          {/* DIP to OPEN */}
-          <div className="p-3 bg-slate-950 border border-slate-800 rounded">
-            <h4 className="text-xs font-semibold text-slate-400 mb-3">DIP → OPEN</h4>
-            <div className="grid grid-cols-3 gap-3">
-              <div className="space-y-1">
-                <label className="text-[10px] text-slate-500 uppercase tracking-tighter">Speed (s)</label>
-                <input 
-                  type="number" 
-                  step="0.0001"
-                  value={config.dipToOpenSpeed}
-                  onChange={(e) => handleConfigChange('dipToOpenSpeed', parseFloat(e.target.value))}
-                  className="bg-slate-900 border border-slate-700 rounded w-full py-1 px-2 text-sm text-slate-300 outline-none focus:border-blue-500"
-                  title="Base step delay in seconds (lower = faster)"
-                />
-              </div>
-              <div className="space-y-1">
-                <label className="text-[10px] text-slate-500 uppercase tracking-tighter">Ramp-Up (steps)</label>
-                <input 
-                  type="number" 
-                  step="1"
-                  value={config.dipToOpenRampUp}
-                  onChange={(e) => handleConfigChange('dipToOpenRampUp', parseInt(e.target.value))}
-                  className="bg-slate-900 border border-slate-700 rounded w-full py-1 px-2 text-sm text-slate-300 outline-none focus:border-blue-500"
-                  title="Number of steps at start to accelerate (0 = no ramp-up)"
-                />
-              </div>
-              <div className="space-y-1">
-                <label className="text-[10px] text-slate-500 uppercase tracking-tighter">Slow-In (steps)</label>
-                <input 
-                  type="number" 
-                  step="1"
-                  value={config.dipToOpenSlowIn}
-                  onChange={(e) => handleConfigChange('dipToOpenSlowIn', parseInt(e.target.value))}
-                  className="bg-slate-900 border border-slate-700 rounded w-full py-1 px-2 text-sm text-slate-300 outline-none focus:border-blue-500"
-                  title="Number of steps before target to start deceleration (0 = no slow-in)"
-                />
-              </div>
+          <div className="flex items-center justify-between p-2 bg-slate-950 border border-slate-800 rounded">
+            <div className="flex items-center gap-2">
+              <Cloud size={14} className={config.smokeEnabled ? "text-red-400" : "text-slate-600"} />
+              <span className="text-xs text-slate-300 font-medium">Smoke Enabled</span>
             </div>
+            <label className="relative inline-flex items-center cursor-pointer">
+              <input
+                type="checkbox"
+                checked={config.smokeEnabled}
+                onChange={(e) => handleConfigChange('smokeEnabled', e.target.checked)}
+                className="sr-only peer"
+              />
+              <div className="w-11 h-6 bg-slate-700 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-red-500 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-red-600"></div>
+            </label>
           </div>
 
-          {/* OPEN to CLOSE */}
-          <div className="p-3 bg-slate-950 border border-slate-800 rounded">
-            <h4 className="text-xs font-semibold text-slate-400 mb-3">OPEN → CLOSE</h4>
-            <div className="grid grid-cols-3 gap-3">
-              <div className="space-y-1">
-                <label className="text-[10px] text-slate-500 uppercase tracking-tighter">Speed (s)</label>
-                <input 
-                  type="number" 
-                  step="0.0001"
-                  value={config.openToCloseSpeed}
-                  onChange={(e) => handleConfigChange('openToCloseSpeed', parseFloat(e.target.value))}
-                  className="bg-slate-900 border border-slate-700 rounded w-full py-1 px-2 text-sm text-slate-300 outline-none focus:border-blue-500"
-                  title="Base step delay in seconds (lower = faster)"
-                />
-              </div>
-              <div className="space-y-1">
-                <label className="text-[10px] text-slate-500 uppercase tracking-tighter">Ramp-Up (steps)</label>
-                <input 
-                  type="number" 
-                  step="1"
-                  value={config.openToCloseRampUp}
-                  onChange={(e) => handleConfigChange('openToCloseRampUp', parseInt(e.target.value))}
-                  className="bg-slate-900 border border-slate-700 rounded w-full py-1 px-2 text-sm text-slate-300 outline-none focus:border-blue-500"
-                  title="Number of steps at start to accelerate (0 = no ramp-up)"
-                />
-              </div>
-              <div className="space-y-1">
-                <label className="text-[10px] text-slate-500 uppercase tracking-tighter">Slow-In (steps)</label>
-                <input 
-                  type="number" 
-                  step="1"
-                  value={config.openToCloseSlowIn}
-                  onChange={(e) => handleConfigChange('openToCloseSlowIn', parseInt(e.target.value))}
-                  className="bg-slate-900 border border-slate-700 rounded w-full py-1 px-2 text-sm text-slate-300 outline-none focus:border-blue-500"
-                  title="Number of steps before target to start deceleration (0 = no slow-in)"
-                />
-              </div>
-            </div>
-          </div>
-
-          {/* CLOSE to DIP */}
-          <div className="p-3 bg-slate-950 border border-slate-800 rounded">
-            <h4 className="text-xs font-semibold text-slate-400 mb-3">CLOSE → DIP</h4>
-            <div className="grid grid-cols-3 gap-3">
-              <div className="space-y-1">
-                <label className="text-[10px] text-slate-500 uppercase tracking-tighter">Speed (s)</label>
-                <input 
-                  type="number" 
-                  step="0.0001"
-                  value={config.closeToDipSpeed}
-                  onChange={(e) => handleConfigChange('closeToDipSpeed', parseFloat(e.target.value))}
-                  className="bg-slate-900 border border-slate-700 rounded w-full py-1 px-2 text-sm text-slate-300 outline-none focus:border-blue-500"
-                  title="Base step delay in seconds (lower = faster)"
-                />
-              </div>
-              <div className="space-y-1">
-                <label className="text-[10px] text-slate-500 uppercase tracking-tighter">Ramp-Up (steps)</label>
-                <input 
-                  type="number" 
-                  step="1"
-                  value={config.closeToDipRampUp}
-                  onChange={(e) => handleConfigChange('closeToDipRampUp', parseInt(e.target.value))}
-                  className="bg-slate-900 border border-slate-700 rounded w-full py-1 px-2 text-sm text-slate-300 outline-none focus:border-blue-500"
-                  title="Number of steps at start to accelerate (0 = no ramp-up)"
-                />
-              </div>
-              <div className="space-y-1">
-                <label className="text-[10px] text-slate-500 uppercase tracking-tighter">Slow-In (steps)</label>
-                <input 
-                  type="number" 
-                  step="1"
-                  value={config.closeToDipSlowIn}
-                  onChange={(e) => handleConfigChange('closeToDipSlowIn', parseInt(e.target.value))}
-                  className="bg-slate-900 border border-slate-700 rounded w-full py-1 px-2 text-sm text-slate-300 outline-none focus:border-blue-500"
-                  title="Number of steps before target to start deceleration (0 = no slow-in)"
-                />
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* Motor Position Status */}
-      <div className="mt-6 border-t border-slate-800 pt-4">
-        <div className="p-3 bg-yellow-500/10 border border-yellow-500/30 rounded-lg mb-4">
-          <div className="flex items-center justify-between mb-2">
-            <span className="text-xs font-bold text-yellow-400 uppercase tracking-wide">Current Motor Positions</span>
-            <button
-              onClick={resetMotorPositions}
-              disabled={!isOnline || isRunning}
-              className="flex items-center gap-1 px-2 py-1 bg-yellow-600 hover:bg-yellow-500 rounded text-[10px] font-bold text-white uppercase tracking-wide transition-all disabled:opacity-40 disabled:cursor-not-allowed"
-              title="Reset positions to 0,0 - align motors physically first!"
-            >
-              <RotateCcw size={10} />
-              Reset to 0,0
-            </button>
-          </div>
-          <div className="grid grid-cols-2 gap-2 text-xs mb-3">
-            <div className="flex justify-between items-center">
-              <span className="text-slate-400">Motor A:</span>
-              <div className="flex items-center gap-2">
-                <span className="text-yellow-300 font-mono font-bold">{motorPositions.motorA}</span>
+          {config.smokeEnabled && (
+            <div className="space-y-3">
+              <div className="grid grid-cols-2 gap-2">
                 <button
-                  onClick={async () => {
-                    const newState = !(motorPositions.motorAEnabled ?? true);
-                    try {
-                      const res = await fetch(`http://${piIp}:8080/set_motor_enabled`, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ motor: 'A', enabled: newState }),
-                      });
-                      if (res.ok) {
-                        const data = await res.json();
-                        if (data.positions) {
-                          setMotorPositions(data.positions);
-                        }
-                      }
-                    } catch (e) {
-                      console.error("Failed to toggle motor:", e);
-                    }
-                  }}
-                  disabled={!isOnline}
-                  className={`px-2 py-0.5 rounded text-[10px] font-semibold uppercase transition-all disabled:opacity-40 ${
-                    motorPositions.motorAEnabled !== false 
-                      ? 'bg-green-600 hover:bg-green-500 text-white' 
-                      : 'bg-slate-700 hover:bg-slate-600 text-slate-300'
-                  }`}
-                  title={motorPositions.motorAEnabled !== false ? "Disable Motor A" : "Enable Motor A"}
+                  onClick={() => onSmokeControl('test')}
+                  disabled={!isOnline || smokeRunning}
+                  className="px-3 py-2 bg-red-600 hover:bg-red-500 disabled:opacity-50 disabled:cursor-not-allowed rounded text-xs font-bold text-white flex items-center justify-center gap-1 transition-all"
                 >
-                  {motorPositions.motorAEnabled !== false ? 'ON' : 'OFF'}
+                  <Cloud size={12} /> Test
+                </button>
+                <button
+                  onClick={() => onSmokeControl(smokeRunning ? 'stop' : 'start')}
+                  disabled={!isOnline}
+                  className={`px-3 py-2 rounded text-xs font-bold text-white flex items-center justify-center gap-1 transition-all ${
+                    smokeRunning 
+                      ? 'bg-red-700 hover:bg-red-600' 
+                      : 'bg-emerald-600 hover:bg-emerald-500'
+                  } disabled:opacity-50 disabled:cursor-not-allowed`}
+                >
+                  {smokeRunning ? <Square size={12} /> : <Play size={12} />}
+                  {smokeRunning ? 'Stop' : 'Start'}
                 </button>
               </div>
-            </div>
-            <div className="flex justify-between items-center">
-              <span className="text-slate-400">Motor B:</span>
-              <div className="flex items-center gap-2">
-                <span className="text-yellow-300 font-mono font-bold">{motorPositions.motorB}</span>
-                <button
-                  onClick={async () => {
-                    const newState = !(motorPositions.motorBEnabled ?? true);
-                    try {
-                      const res = await fetch(`http://${piIp}:8080/set_motor_enabled`, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ motor: 'B', enabled: newState }),
-                      });
-                      if (res.ok) {
-                        const data = await res.json();
-                        if (data.positions) {
-                          setMotorPositions(data.positions);
-                        }
-                      }
-                    } catch (e) {
-                      console.error("Failed to toggle motor:", e);
-                    }
-                  }}
-                  disabled={!isOnline}
-                  className={`px-2 py-0.5 rounded text-[10px] font-semibold uppercase transition-all disabled:opacity-40 ${
-                    motorPositions.motorBEnabled !== false 
-                      ? 'bg-green-600 hover:bg-green-500 text-white' 
-                      : 'bg-slate-700 hover:bg-slate-600 text-slate-300'
-                  }`}
-                  title={motorPositions.motorBEnabled !== false ? "Disable Motor B" : "Enable Motor B"}
-                >
-                  {motorPositions.motorBEnabled !== false ? 'ON' : 'OFF'}
-                </button>
-              </div>
-            </div>
-          </div>
-          <div className="text-[10px] text-slate-500">
-            Disabled motors won't move during sequences. Enable state is saved with setups.
-          </div>
-          <div className="text-[10px] text-yellow-400/70 mt-2">
-            ⚠️ Always reset to 0,0 after server restart or code update, then physically align motors
-          </div>
-        </div>
-      </div>
-
-      {/* Motor Setups/Scenes */}
-      <div className="mt-6 border-t border-slate-800 pt-4">
-        <div className="flex justify-between items-center mb-4">
-          <h3 className="text-sm font-semibold text-slate-300 flex items-center gap-2">
-            <FolderOpen size={14} /> Motor Setups / Scenes
-          </h3>
-        </div>
-        
-        <div className="space-y-3">
-          {/* Save Setup */}
-          <div className="flex gap-2">
-            <input
-              type="text"
-              value={setupName}
-              onChange={(e) => setSetupName(e.target.value)}
-              placeholder="Setup name..."
-              className="flex-1 bg-slate-900 border border-slate-700 rounded px-2 py-1 text-sm text-slate-300 outline-none focus:border-blue-500"
-              onKeyPress={(e) => {
-                if (e.key === 'Enter' && setupName.trim()) {
-                  onSaveSetup();
-                }
-              }}
-            />
-            <button
-              onClick={onSaveSetup}
-              disabled={!isOnline || !setupName.trim()}
-              className="px-3 py-1 bg-blue-600 hover:bg-blue-500 rounded text-xs font-semibold text-white uppercase tracking-wide transition-all disabled:opacity-40 disabled:bg-slate-700 disabled:cursor-not-allowed flex items-center gap-1"
-            >
-              <FolderPlus size={12} /> Save
-            </button>
-          </div>
-
-          {/* List of Setups */}
-          {Object.keys(setups).length > 0 && (
-            <div className="space-y-2">
-              {Object.keys(setups).map((name) => (
-                <div key={name} className="flex items-center gap-2 p-2 bg-slate-950 border border-slate-800 rounded">
-                  <span className="flex-1 text-xs text-slate-300">{name}</span>
-                  <button
-                    onClick={() => onLoadSetup(name)}
-                    disabled={!isOnline}
-                    className="px-2 py-1 bg-green-600 hover:bg-green-500 rounded text-[10px] font-semibold text-white uppercase transition-all disabled:opacity-40 disabled:bg-slate-700 disabled:cursor-not-allowed flex items-center gap-1"
-                  >
-                    <FolderOpen size={10} /> Load
-                  </button>
-                  <button
-                    onClick={() => onDeleteSetup(name)}
-                    disabled={!isOnline}
-                    className="px-2 py-1 bg-red-600 hover:bg-red-500 rounded text-[10px] font-semibold text-white uppercase transition-all disabled:opacity-40 disabled:bg-slate-700 disabled:cursor-not-allowed flex items-center gap-1"
-                  >
-                    <Trash2 size={10} />
-                  </button>
+              
+              <div>
+                <div className="flex justify-between text-xs text-slate-400 mb-1">
+                  <span className="flex items-center gap-1"><Cloud size={12}/> Intensity</span>
+                  <span className="text-red-400 font-mono">{config.smokeIntensity}/127</span>
                 </div>
-              ))}
+                <input 
+                  type="range" 
+                  min="0" 
+                  max="127" 
+                  value={config.smokeIntensity} 
+                  onChange={(e) => handleConfigChange('smokeIntensity', e.target.value)}
+                  className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-red-500"
+                />
+              </div>
+              
+              <div>
+                <label className="text-[10px] text-slate-500 uppercase tracking-tighter">Duration (s)</label>
+                <input 
+                  type="number" 
+                  step="0.1"
+                  min="0.1"
+                  max="30"
+                  value={config.smokeDuration}
+                  onChange={(e) => handleConfigChange('smokeDuration', e.target.value)}
+                  className="bg-slate-950 border border-slate-800 rounded w-full py-1 px-2 text-sm text-slate-300 outline-none focus:border-red-500"
+                />
+              </div>
             </div>
           )}
-          
-          {Object.keys(setups).length === 0 && (
-            <div className="text-xs text-slate-500 text-center py-2">
-              No saved setups. Save current motor positions as a setup above.
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* Motor Trimming Section */}
-      <div className="mt-6 border-t border-slate-800 pt-4">
-        <div className="flex justify-between items-center mb-4">
-          <h3 className="text-sm font-semibold text-slate-300 flex items-center gap-2">
-            <Settings size={14} /> Motor Trimming
-          </h3>
-          <div className="flex gap-1 flex-wrap">
-            <button
-              onClick={saveHome}
-              disabled={!isOnline}
-              className="flex items-center gap-1 px-2 py-1 bg-green-600 hover:bg-green-500 rounded text-[10px] font-bold text-white uppercase tracking-wide transition-all disabled:opacity-40 disabled:cursor-not-allowed"
-              title="Save current position as HOME (OPEN)"
-            >
-              <Save size={10} />
-              Home
-            </button>
-            <button
-              onClick={saveDip}
-              disabled={!isOnline}
-              className="flex items-center gap-1 px-2 py-1 bg-green-600 hover:bg-green-500 rounded text-[10px] font-bold text-white uppercase tracking-wide transition-all disabled:opacity-40 disabled:cursor-not-allowed"
-              title="Save current position as DIP"
-            >
-              <Save size={10} />
-              DIP
-            </button>
-            <button
-              onClick={saveClose}
-              disabled={!isOnline}
-              className="flex items-center gap-1 px-2 py-1 bg-green-600 hover:bg-green-500 rounded text-[10px] font-bold text-white uppercase tracking-wide transition-all disabled:opacity-40 disabled:cursor-not-allowed"
-              title="Save current position as CLOSE"
-            >
-              <Save size={10} />
-              CLOSE
-            </button>
-            <button
-              onClick={returnToHome}
-              disabled={!isOnline || isTrimming}
-              className="flex items-center gap-1 px-2 py-1 bg-blue-600 hover:bg-blue-500 rounded text-[10px] font-bold text-white uppercase tracking-wide transition-all disabled:opacity-40 disabled:cursor-not-allowed"
-              title="Return to HOME position (OPEN arms)"
-            >
-              <Home size={10} />
-              Home
-            </button>
-          </div>
-        </div>
-        
-        <div className="space-y-3">
-          {/* Motor A */}
-          <div className="p-3 bg-slate-950 border border-slate-800 rounded">
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-xs font-bold text-slate-300">Motor A</span>
-              <span className="text-xs text-slate-500 font-mono">Position: {motorPositions.motorA}</span>
-            </div>
-            <div className="flex gap-2">
-              <button
-                onClick={() => trimMotor('A', 'backward', 10)}
-                onMouseDown={() => startContinuousTrim('A', 'backward', 10)}
-                onMouseUp={stopContinuousTrim}
-                onMouseLeave={stopContinuousTrim}
-                onTouchStart={() => startContinuousTrim('A', 'backward', 10)}
-                onTouchEnd={stopContinuousTrim}
-                disabled={!isOnline || isRunning}
-                className="flex-1 flex items-center justify-center gap-1 px-2 py-1.5 bg-slate-800 hover:bg-slate-700 active:bg-slate-600 disabled:opacity-50 disabled:cursor-not-allowed rounded text-xs text-slate-200 transition-all select-none"
-              >
-                <ArrowLeft size={14} /> 10
-              </button>
-              <button
-                onClick={() => trimMotor('A', 'backward', 1)}
-                onMouseDown={() => startContinuousTrim('A', 'backward', 1)}
-                onMouseUp={stopContinuousTrim}
-                onMouseLeave={stopContinuousTrim}
-                onTouchStart={() => startContinuousTrim('A', 'backward', 1)}
-                onTouchEnd={stopContinuousTrim}
-                disabled={!isOnline || isRunning}
-                className="flex-1 flex items-center justify-center gap-1 px-2 py-1.5 bg-slate-800 hover:bg-slate-700 active:bg-slate-600 disabled:opacity-50 disabled:cursor-not-allowed rounded text-xs text-slate-200 transition-all select-none"
-              >
-                <ArrowLeft size={14} /> 1
-              </button>
-              <button
-                onClick={() => trimMotor('A', 'forward', 1)}
-                onMouseDown={() => startContinuousTrim('A', 'forward', 1)}
-                onMouseUp={stopContinuousTrim}
-                onMouseLeave={stopContinuousTrim}
-                onTouchStart={() => startContinuousTrim('A', 'forward', 1)}
-                onTouchEnd={stopContinuousTrim}
-                disabled={!isOnline || isRunning}
-                className="flex-1 flex items-center justify-center gap-1 px-2 py-1.5 bg-slate-800 hover:bg-slate-700 active:bg-slate-600 disabled:opacity-50 disabled:cursor-not-allowed rounded text-xs text-slate-200 transition-all select-none"
-              >
-                1 <ArrowRight size={14} />
-              </button>
-              <button
-                onClick={() => trimMotor('A', 'forward', 10)}
-                onMouseDown={() => startContinuousTrim('A', 'forward', 10)}
-                onMouseUp={stopContinuousTrim}
-                onMouseLeave={stopContinuousTrim}
-                onTouchStart={() => startContinuousTrim('A', 'forward', 10)}
-                onTouchEnd={stopContinuousTrim}
-                disabled={!isOnline || isRunning}
-                className="flex-1 flex items-center justify-center gap-1 px-2 py-1.5 bg-slate-800 hover:bg-slate-700 active:bg-slate-600 disabled:opacity-50 disabled:cursor-not-allowed rounded text-xs text-slate-200 transition-all select-none"
-              >
-                10 <ArrowRight size={14} />
-              </button>
-            </div>
-          </div>
-          
-          {/* Motor B */}
-          <div className="p-3 bg-slate-950 border border-slate-800 rounded">
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-xs font-bold text-slate-300">Motor B</span>
-              <span className="text-xs text-slate-500 font-mono">Position: {motorPositions.motorB}</span>
-            </div>
-            <div className="flex gap-2">
-              <button
-                onClick={() => trimMotor('B', 'backward', 10)}
-                onMouseDown={() => startContinuousTrim('B', 'backward', 10)}
-                onMouseUp={stopContinuousTrim}
-                onMouseLeave={stopContinuousTrim}
-                onTouchStart={() => startContinuousTrim('B', 'backward', 10)}
-                onTouchEnd={stopContinuousTrim}
-                disabled={!isOnline || isRunning}
-                className="flex-1 flex items-center justify-center gap-1 px-2 py-1.5 bg-slate-800 hover:bg-slate-700 active:bg-slate-600 disabled:opacity-50 disabled:cursor-not-allowed rounded text-xs text-slate-200 transition-all select-none"
-              >
-                <ArrowLeft size={14} /> 10
-              </button>
-              <button
-                onClick={() => trimMotor('B', 'backward', 1)}
-                onMouseDown={() => startContinuousTrim('B', 'backward', 1)}
-                onMouseUp={stopContinuousTrim}
-                onMouseLeave={stopContinuousTrim}
-                onTouchStart={() => startContinuousTrim('B', 'backward', 1)}
-                onTouchEnd={stopContinuousTrim}
-                disabled={!isOnline || isRunning}
-                className="flex-1 flex items-center justify-center gap-1 px-2 py-1.5 bg-slate-800 hover:bg-slate-700 active:bg-slate-600 disabled:opacity-50 disabled:cursor-not-allowed rounded text-xs text-slate-200 transition-all select-none"
-              >
-                <ArrowLeft size={14} /> 1
-              </button>
-              <button
-                onClick={() => trimMotor('B', 'forward', 1)}
-                onMouseDown={() => startContinuousTrim('B', 'forward', 1)}
-                onMouseUp={stopContinuousTrim}
-                onMouseLeave={stopContinuousTrim}
-                onTouchStart={() => startContinuousTrim('B', 'forward', 1)}
-                onTouchEnd={stopContinuousTrim}
-                disabled={!isOnline || isRunning}
-                className="flex-1 flex items-center justify-center gap-1 px-2 py-1.5 bg-slate-800 hover:bg-slate-700 active:bg-slate-600 disabled:opacity-50 disabled:cursor-not-allowed rounded text-xs text-slate-200 transition-all select-none"
-              >
-                1 <ArrowRight size={14} />
-              </button>
-              <button
-                onClick={() => trimMotor('B', 'forward', 10)}
-                onMouseDown={() => startContinuousTrim('B', 'forward', 10)}
-                onMouseUp={stopContinuousTrim}
-                onMouseLeave={stopContinuousTrim}
-                onTouchStart={() => startContinuousTrim('B', 'forward', 10)}
-                onTouchEnd={stopContinuousTrim}
-                disabled={!isOnline || isRunning}
-                className="flex-1 flex items-center justify-center gap-1 px-2 py-1.5 bg-slate-800 hover:bg-slate-700 active:bg-slate-600 disabled:opacity-50 disabled:cursor-not-allowed rounded text-xs text-slate-200 transition-all select-none"
-              >
-                10 <ArrowRight size={14} />
-              </button>
-            </div>
-          </div>
-          
-          <div className="text-[10px] text-slate-500 text-center pt-2 border-t border-slate-800">
-            Click trim buttons for single moves, or <strong className="text-slate-400">hold down</strong> for continuous trimming. 
-            Then click <strong className="text-slate-400">Save Home/DIP/CLOSE</strong> to save. 
-            Saved positions will be used automatically in sequences.
-          </div>
         </div>
       </div>
     </div>

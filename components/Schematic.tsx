@@ -6,16 +6,22 @@ interface SchematicProps {
   activeState: MachineState;
   fanSpeed: number;
   fanEnabled: boolean;
+  fanRunning?: boolean;
   highlight?: SystemHighlight;
+  motorAPosition?: number;
+  motorBPosition?: number;
+  movementDuration?: number;
 }
 
-const Schematic: React.FC<SchematicProps> = ({ activeState, fanSpeed, fanEnabled, highlight }) => {
-  const isFanOn = fanEnabled && (activeState === MachineState.BLOW || activeState === MachineState.CLOSE || activeState === MachineState.SMOKE_TEST);
+const Schematic: React.FC<SchematicProps> = ({ activeState, fanSpeed, fanEnabled, fanRunning = false, highlight, motorAPosition = 0, motorBPosition = 0, movementDuration = 0 }) => {
+  // Use actual fanRunning state from server, not just based on activeState
+  const isFanOn = fanEnabled && fanRunning;
   const isSmokeOn = activeState === MachineState.BLOW || activeState === MachineState.CLOSE || activeState === MachineState.SMOKE_TEST;
-  const isMotorMoving = activeState === MachineState.OPEN || activeState === MachineState.CLOSE || activeState === MachineState.DIP;
+  const isMotorMoving = activeState === MachineState.OPEN || activeState === MachineState.CLOSE || activeState === MachineState.DIP || activeState === MachineState.HOME;
   
   let armRotation = 0;
-  let transitionDuration = '1s';
+  // Use actual movement duration for 1:1 simulation, with minimum of 0.1s for smooth animation
+  let transitionDuration = movementDuration > 0 ? `${Math.max(0.1, movementDuration)}s` : '1s';
   
   switch (activeState) {
     case MachineState.BLOW:
@@ -25,7 +31,7 @@ const Schematic: React.FC<SchematicProps> = ({ activeState, fanSpeed, fanEnabled
       break;
     case MachineState.CLOSE:
       armRotation = 0;
-      transitionDuration = '1.5s';
+      transitionDuration = movementDuration > 0 ? `${Math.max(0.1, movementDuration)}s` : '1.5s';
       break;
     case MachineState.IDLE:
        armRotation = -75; 
@@ -33,11 +39,12 @@ const Schematic: React.FC<SchematicProps> = ({ activeState, fanSpeed, fanEnabled
        break;
     case MachineState.DIP:
       armRotation = 60;
-      transitionDuration = '1s';
+      transitionDuration = movementDuration > 0 ? `${Math.max(0.1, movementDuration)}s` : '1s';
       break;
     case MachineState.OPEN:
+    case MachineState.HOME:
       armRotation = -75;
-      transitionDuration = '4s';
+      transitionDuration = movementDuration > 0 ? `${Math.max(0.1, movementDuration)}s` : '4s';
       break;
     default:
       armRotation = -75;
@@ -84,7 +91,7 @@ const Schematic: React.FC<SchematicProps> = ({ activeState, fanSpeed, fanEnabled
           <path d="M 855 125 L 855 450" stroke="#475569" strokeWidth="2" strokeDasharray="4 2" />
           <path d="M 885 125 L 885 450" stroke="#475569" strokeWidth="2" strokeDasharray="4 2" />
           <path d="M 230 530 L 230 450" stroke="#475569" strokeWidth="2" />
-          <path d="M 915 236 L 915 450" stroke="#475569" strokeWidth="2" strokeDasharray="4 2" />
+          <path d="M 460 290 L 460 450" stroke="#475569" strokeWidth="2" strokeDasharray="4 2" />
         </g>
 
         {/* --- POWER WIRES (RED 24V / YELLOW 12V) --- */}
@@ -94,7 +101,8 @@ const Schematic: React.FC<SchematicProps> = ({ activeState, fanSpeed, fanEnabled
           <path d="M 610 60 L 825 60 L 825 105" stroke={getWireColor(true, 'power')} strokeWidth="2" fill="none" />
           
           <path d="M 915 115 L 945 115 L 945 216 L 920 216" stroke={getWireColor(true, '12v')} strokeWidth="2" fill="none" />
-          <path d="M 885 115 L 885 236 L 920 236" stroke="#475569" strokeWidth="2" fill="none" />
+          <path d="M 885 115 L 885 250 L 460 250" stroke="#475569" strokeWidth="2" fill="none" />
+          <path d="M 460 250 L 460 290" stroke="#475569" strokeWidth="2" fill="none" />
 
           {/* PSU WITH AC LABELS */}
           <g transform="translate(50, 40)">
@@ -133,13 +141,17 @@ const Schematic: React.FC<SchematicProps> = ({ activeState, fanSpeed, fanEnabled
           </g>
           
           <g transform="translate(200, 40)">
-            <rect width="150" height="140" rx="4" fill="#1e293b" stroke={highlight === 'motors' ? '#3b82f6' : '#475569'} strokeWidth={highlight === 'motors' ? 4 : 2} />
+            <rect width="150" height="140" rx="4" fill="#1e293b" stroke={highlight === 'motors' ? '#3b82f6' : (motorAPosition === 0 ? '#10b981' : '#475569')} strokeWidth={highlight === 'motors' ? 4 : (motorAPosition === 0 ? 3 : 2)} />
             <text x="75" y="25" textAnchor="middle" fill="#cbd5e1" fontSize="14" fontWeight="bold">TB6600 A</text>
+            <text x="75" y="45" textAnchor="middle" fill={motorAPosition === 0 ? '#10b981' : '#60a5fa'} fontSize="11" fontFamily="monospace" fontWeight={motorAPosition === 0 ? 'bold' : 'normal'}>Pos: {motorAPosition}</text>
+            {motorAPosition === 0 && <text x="75" y="60" textAnchor="middle" fill="#10b981" fontSize="9" fontFamily="monospace">● HOME</text>}
           </g>
 
           <g transform="translate(600, 40)">
-            <rect width="150" height="140" rx="4" fill="#1e293b" stroke={highlight === 'motors' ? '#3b82f6' : '#475569'} strokeWidth={highlight === 'motors' ? 4 : 2} />
+            <rect width="150" height="140" rx="4" fill="#1e293b" stroke={highlight === 'motors' ? '#3b82f6' : (motorBPosition === 0 ? '#10b981' : '#475569')} strokeWidth={highlight === 'motors' ? 4 : (motorBPosition === 0 ? 3 : 2)} />
             <text x="75" y="25" textAnchor="middle" fill="#cbd5e1" fontSize="14" fontWeight="bold">TB6600 B</text>
+            <text x="75" y="45" textAnchor="middle" fill={motorBPosition === 0 ? '#10b981' : '#60a5fa'} fontSize="11" fontFamily="monospace" fontWeight={motorBPosition === 0 ? 'bold' : 'normal'}>Pos: {motorBPosition}</text>
+            {motorBPosition === 0 && <text x="75" y="60" textAnchor="middle" fill="#10b981" fontSize="9" fontFamily="monospace">● HOME</text>}
           </g>
         </g>
 
@@ -149,16 +161,11 @@ const Schematic: React.FC<SchematicProps> = ({ activeState, fanSpeed, fanEnabled
           <path d="M 100 530 L 100 210 L 180 210 L 180 150 L 210 150" stroke="#facc15" strokeWidth="1.5" fill="none" />
           <path d="M 130 530 L 130 220 L 590 220 L 590 120 L 610 120" stroke="#22d3ee" strokeWidth="1.5" fill="none" />
           <path d="M 160 530 L 160 230 L 580 230 L 580 150 L 610 150" stroke="#fb923c" strokeWidth="1.5" fill="none" />
-          <path d="M 190 530 L 190 230 L 800 230 L 800 185 L 820 185" stroke="#60a5fa" strokeWidth="1.5" fill="none" />
+          <path d="M 190 530 L 190 230 L 460 230 L 460 250" stroke="#60a5fa" strokeWidth="1.5" fill="none" />
           
           <g transform="translate(40, 530)">
             <rect width="240" height="150" rx="6" fill="#064e3b" stroke={highlight === 'logic' ? '#10b981' : '#10b981'} strokeWidth={highlight === 'logic' ? 5 : 3} />
             <text x="120" y="80" textAnchor="middle" fill="#e2e8f0" fontSize="20" fontWeight="bold">Pi 3</text>
-          </g>
-
-          <g transform="translate(820, 160)">
-            <rect width="100" height="80" rx="4" fill="#15803d" stroke={highlight === 'logic' ? '#4ade80' : '#14532d'} strokeWidth={highlight === 'logic' ? 4 : 2} />
-            <text x="50" y="30" textAnchor="middle" fill="#f0fdf4" fontSize="12" fontWeight="bold">MOSFET</text>
           </g>
 
           <g transform="translate(760, 580)">
@@ -191,12 +198,15 @@ const Schematic: React.FC<SchematicProps> = ({ activeState, fanSpeed, fanEnabled
         </g>
 
         <g transform="translate(460, 250)" style={{ opacity: highlight ? 0.4 : 1 }}>
-             <circle cx="40" cy="40" r="40" fill="#334155" stroke={!fanEnabled ? '#ef4444' : (isFanOn ? '#3b82f6' : '#64748b')} strokeWidth="2" strokeDasharray={!fanEnabled ? "4 4" : "none"} />
+             <circle cx="40" cy="40" r="40" fill={isFanOn ? "#1e3a8a" : "#334155"} stroke={!fanEnabled ? '#ef4444' : (isFanOn ? '#60a5fa' : '#64748b')} strokeWidth={isFanOn ? "3" : "2"} strokeDasharray={!fanEnabled ? "4 4" : "none"} />
              {fanEnabled ? (
                <g transform={isFanOn ? 'rotate(0 40 40)' : 'rotate(0 40 40)'}>
                  {isFanOn && <animateTransform attributeName="transform" type="rotate" from="0 40 40" to="360 40 40" dur={fanAnimDuration} repeatCount="indefinite" />}
-                 <path d="M 40 40 L 40 10" stroke="#cbd5e1" strokeWidth="4" />
-                 <path d="M 40 40 L 70 40" stroke="#cbd5e1" strokeWidth="4" />
+                 <path d="M 40 40 L 40 10" stroke={isFanOn ? "#60a5fa" : "#cbd5e1"} strokeWidth="4" />
+                 <path d="M 40 40 L 70 40" stroke={isFanOn ? "#60a5fa" : "#cbd5e1"} strokeWidth="4" />
+                 {isFanOn && (
+                   <text x="40" y="55" textAnchor="middle" fill="#60a5fa" fontSize="8" fontWeight="bold">ON</text>
+                 )}
                </g>
              ) : (
                <g>

@@ -14,7 +14,7 @@ const PinoutGuide: React.FC<PinoutGuideProps> = ({ pins, onHighlight }) => {
     { name: 'Motor A Dir', bcm: pins.dirA, phys: 13, term: 'DIR+', highlight: 'motors' as SystemHighlight },
     { name: 'Motor B Step', bcm: pins.stepB, phys: 15, term: 'PUL+', highlight: 'motors' as SystemHighlight },
     { name: 'Motor B Dir', bcm: pins.dirB, phys: 16, term: 'DIR+', highlight: 'motors' as SystemHighlight },
-    { name: 'Fan (MOSFET)', bcm: pins.pwmFan, phys: 12, term: 'SIG / PWM', highlight: 'logic' as SystemHighlight },
+    { name: 'Fan PWM (3-wire)', bcm: pins.pwmFan, phys: 12, term: 'PWM Control', highlight: 'logic' as SystemHighlight },
     { name: 'Ground', bcm: 'GND', phys: 6, term: 'Common Ground', highlight: 'power' as SystemHighlight },
   ];
 
@@ -75,27 +75,23 @@ const PinoutGuide: React.FC<PinoutGuideProps> = ({ pins, onHighlight }) => {
         {/* FAN WIRING INSTRUCTIONS */}
         <div className="bg-blue-950/30 border border-blue-500/50 rounded-xl p-4 space-y-3">
            <div className="flex items-center gap-2 text-blue-400 font-bold text-xs uppercase tracking-widest">
-              <Zap size={14} /> Fan Wiring (2-Wire DC Fan)
+              <Zap size={14} /> Fan Wiring (3-Wire PWM Fan)
            </div>
            <div className="space-y-2 text-[11px] text-blue-100/90 leading-relaxed">
              <div className="flex items-start gap-2">
                <span className="font-bold text-blue-300">1.</span>
-               <span><strong className="text-yellow-300">Fan Positive (Red wire)</strong> → Connect to <strong>12V output</strong> from your 12V Buck Converter</span>
+               <span><strong className="text-yellow-300">Fan Power (Red wire)</strong> → Connect to <strong>12V output</strong> from your 12V Buck Converter</span>
              </div>
              <div className="flex items-start gap-2">
                <span className="font-bold text-blue-300">2.</span>
-               <span><strong className="text-yellow-300">Fan Negative (Black wire)</strong> → Connect to <strong>MOSFET Drain (D)</strong> terminal</span>
+               <span><strong className="text-yellow-300">Fan Ground (Black wire)</strong> → Connect to <strong>Common Ground</strong> (PSU V-)</span>
              </div>
              <div className="flex items-start gap-2">
                <span className="font-bold text-blue-300">3.</span>
-               <span><strong className="text-yellow-300">MOSFET Source (S)</strong> → Connect to <strong>Common Ground</strong> (PSU V-)</span>
-             </div>
-             <div className="flex items-start gap-2">
-               <span className="font-bold text-blue-300">4.</span>
-               <span><strong className="text-yellow-300">MOSFET Gate (G)</strong> → Connect to <strong>Pi GPIO Pin 18</strong> (Physical Pin 12, BCM 18)</span>
+               <span><strong className="text-yellow-300">Fan PWM Control (Yellow wire)</strong> → Connect directly to <strong>Pi GPIO Pin 18</strong> (Physical Pin 12, BCM 18)</span>
              </div>
              <div className="mt-2 pt-2 border-t border-blue-500/30 text-[10px] text-blue-200/70 italic">
-               ⚠️ Most DC fans run on 12V. Check your fan's voltage rating before connecting!
+               ✅ No MOSFET needed! 3-wire fans have built-in PWM control. GPIO 18 provides PWM signal directly.
              </div>
            </div>
         </div>
