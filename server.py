@@ -1097,9 +1097,8 @@ def handle_request(conn, addr):
                     target_a = GLOBAL_CONFIG['motorAClosePosition']
                     target_b = GLOBAL_CONFIG['motorBClosePosition']
                     logger.info("CLOSE state: Using target positions from GLOBAL_CONFIG: A={}, B={}".format(target_a, target_b))
-                    # Apply slow-out (slow start) for CLOSE movement - start slow, then speed up
-                    # Reduced slow-out distance for faster CLOSE movement
-                    movement_duration = move_motors_to_position(target_a, target_b, use_slow_out=True, slow_out_start_distance=100)
+                    # No slow start for CLOSE movement - start at full speed immediately
+                    movement_duration = move_motors_to_position(target_a, target_b, use_slow_out=False)
                     # NOTE: Fan control should be handled by timeline blocks, not by motor states
                     # Removing automatic fan stop on CLOSE - let timeline control fan
                     if fan_pwm and fan_running:
