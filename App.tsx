@@ -269,19 +269,35 @@ const App: React.FC = () => {
   };
 
   const handleSmokeControl = async (action: 'start' | 'stop' | 'test') => {
-    if (!piIp || !isPiOnline) return;
+    console.log(`handleSmokeControl called: action=${action}, piIp=${piIp}, isPiOnline=${isPiOnline}`);
+    if (!piIp || !isPiOnline) {
+      console.warn("Cannot control smoke: piIp or isPiOnline is false", { piIp, isPiOnline });
+      return;
+    }
     try {
+      const requestBody = {
+        action,
+        intensity: config.smokeIntensity,
+        duration: config.smokeDuration,
+      };
+      console.log(`Sending smoke control request:`, requestBody);
       const response = await fetch(`http://${piIp}:8080/control_smoke`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          action,
-          intensity: config.smokeIntensity,
-          duration: config.smokeDuration,
-        }),
+        body: JSON.stringify(requestBody),
       });
+      console.log(`Smoke control response status:`, response.status);
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
       const data = await response.json();
-      setSmokeRunning(data.smoke_running || false);
+      console.log(`Smoke control response data:`, data);
+      if (data.success) {
+        setSmokeRunning(data.smoke_running || false);
+        console.log(`Smoke ${action} successful, smokeRunning set to:`, data.smoke_running);
+      } else {
+        console.error("Smoke control failed:", data);
+      }
     } catch (e) {
       console.error("Failed to control smoke:", e);
     }
@@ -452,6 +468,8 @@ const App: React.FC = () => {
       case 'smoke':
         if (block.action === 'start') {
           const smokeIntensity = block.config?.smokeIntensity || config.smokeIntensity;
+          const smokeDuration = block.duration || config.smokeDuration;
+          console.log(`Starting smoke: intensity=${smokeIntensity}, duration=${smokeDuration}`);
           if (piIp && isPiOnline) {
             // Don't await - execute immediately for accurate timing
             fetch(`http://${piIp}:8080/control_smoke`, {
@@ -460,13 +478,25 @@ const App: React.FC = () => {
               body: JSON.stringify({
                 action: 'start',
                 intensity: smokeIntensity,
-                duration: block.duration,
+                duration: smokeDuration,
               }),
             })
-            .then(() => setSmokeRunning(true))
+            .then(response => {
+              console.log("Smoke start response:", response.status);
+              return response.json();
+            })
+            .then(data => {
+              console.log("Smoke start data:", data);
+              if (data.success) {
+                setSmokeRunning(true);
+              }
+            })
             .catch(e => console.error("Failed to start smoke:", e));
+          } else {
+            console.warn("Cannot start smoke: piIp or isPiOnline is false", { piIp, isPiOnline });
           }
         } else {
+          console.log(`Stopping smoke`);
           if (piIp && isPiOnline) {
             // Don't await - execute immediately for accurate timing
             fetch(`http://${piIp}:8080/control_smoke`, {

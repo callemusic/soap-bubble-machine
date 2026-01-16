@@ -320,7 +320,7 @@ const MultiTrackTimeline: React.FC<MultiTrackTimelineProps> = ({
           type: 'smoke',
           action: 'start',
           startTime,
-          duration: 3.0,
+          duration: 1.0, // Default smoke duration: 1 second
           config: { smokeIntensity: config.smokeIntensity },
         };
         break;

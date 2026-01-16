@@ -48,10 +48,10 @@ DEFAULT_CONFIG = {
     'fanSpeed': 100,
     'fanEnabled': True,  # Default enabled for 3-wire fan
     'smokeEnabled': False,
-    'smokeIntensity': 120,  # MIDI CC value (0-127) - this worked with DOREMiDi!
+    'smokeIntensity': 127,  # MIDI CC value (0-127) - full intensity for DOREMiDi MTD-10
     'smokeDuration': 3.0,
     'smokeMidiChannel': 0,  # MIDI Channel 0 (0-based) = Channel 1 (1-based) - matches test_midi_smoke.py
-    'smokeMidiCC': 1,
+    'smokeMidiCC': 1,  # CC number 1 - matches test_midi_smoke.py
     # Motor position targets (defaults, will be calibrated)
     'motorADipPosition': 200,
     'motorBDipPosition': -200,
@@ -241,22 +241,33 @@ def init_midi():
         if MIDI_TYPE == 'mido':
             # Use mido (Python 3, preferred)
             ports = mido.get_output_names()
+            logger.info("Available MIDI output ports: {}".format(ports))
             midi_port_name = None
             
+            # First, try to find DOREMiDi port
             for port in ports:
                 if 'doremidi' in port.lower() or 'mtd' in port.lower():
                     midi_port_name = port
                     logger.info("Found DOREMiDi port: {}".format(port))
                     break
             
+            # If DOREMiDi not found, use port at index 1 if available, otherwise first port
             if not midi_port_name and ports:
-                midi_port_name = ports[0]
-                logger.warning("DOREMiDi port not found, using: {}".format(midi_port_name))
+                if len(ports) > 1:
+                    midi_port_name = ports[1]  # Use port index 1 (second port)
+                    logger.info("DOREMiDi port not found, using port at index 1: {}".format(midi_port_name))
+                else:
+                    midi_port_name = ports[0]
+                    logger.warning("DOREMiDi port not found, using first available port: {}".format(midi_port_name))
             
             if midi_port_name:
                 midi_port = mido.open_output(midi_port_name)
                 midi_initialized = True
-                logger.info("MIDI initialized using mido on port: {}".format(midi_port_name))
+                logger.info("MIDI initialized using mido on port: {} (Channel: {}, CC: {}, Intensity: {})".format(
+                    midi_port_name, 
+                    GLOBAL_CONFIG.get('smokeMidiChannel', 0),
+                    GLOBAL_CONFIG.get('smokeMidiCC', 1),
+                    GLOBAL_CONFIG.get('smokeIntensity', 127)))
                 return True
             else:
                 logger.error("No MIDI output ports found")
@@ -264,33 +275,54 @@ def init_midi():
                 
         elif MIDI_TYPE == 'pygame':
             # Use pygame.midi (fallback)
-            pygame.midi.init()
+            # Only initialize if not already initialized to avoid invalidating port IDs
+            if not pygame.midi.get_init():
+                pygame.midi.init()
+                logger.info("pygame.midi initialized")
+            else:
+                logger.info("pygame.midi already initialized, reusing existing session")
             
-            # Find DOREMiDi port
+            logger.info("Scanning for MIDI output ports...")
+            # Collect all output ports
             port_id = None
+            output_ports = []
             for i in range(pygame.midi.get_count()):
                 info = pygame.midi.get_device_info(i)
                 if info[3]:  # is_output
-                    port_name = info[1].lower()
-                    if 'doremidi' in port_name or 'mtd' in port_name:
-                        port_id = i
-                        logger.info("Found DOREMiDi port: {} (ID: {})".format(info[1], i))
-                        break
+                    # info[1] is bytes, decode to string for comparison
+                    port_name = info[1].decode('utf-8', errors='ignore').lower()
+                    port_display = info[1].decode('utf-8', errors='ignore')
+                    output_ports.append((i, port_display))
+                    logger.info("Found MIDI output port {}: {}".format(i, port_display))
             
-            if port_id is None:
-                # Use first available output port
-                for i in range(pygame.midi.get_count()):
-                    info = pygame.midi.get_device_info(i)
-                    if info[3]:  # is_output
-                        port_id = i
-                        logger.info("Using MIDI port: {} (ID: {})".format(info[1], i))
-                        break
+            # Use port at index 1 (second output port) if available, matching test script behavior
+            # This corresponds to "port_name 1" in the test script
+            if len(output_ports) > 1:
+                port_id = output_ports[1][0]  # Use second output port (index 1)
+                port_display = output_ports[1][1]
+                logger.info("Using port at index 1 (second output port): {} (device ID: {})".format(port_display, port_id))
+            elif len(output_ports) > 0:
+                port_id = output_ports[0][0]
+                port_display = output_ports[0][1]
+                logger.info("Only one output port available, using: {} (device ID: {})".format(port_display, port_id))
             
             if port_id is not None:
-                midi_port = port_id  # Store port ID for pygame
-                midi_initialized = True
-                logger.info("MIDI initialized using pygame.midi on port ID: {}".format(port_id))
-                return True
+                # Test that the port is valid by trying to open it
+                try:
+                    test_out = pygame.midi.Output(port_id)
+                    test_out.close()
+                    midi_port = port_id  # Store port ID for pygame
+                    midi_initialized = True
+                    logger.info("MIDI initialized using pygame.midi on port: {} (ID: {}, Channel: {}, CC: {}, Intensity: {})".format(
+                        port_display, port_id,
+                        GLOBAL_CONFIG.get('smokeMidiChannel', 0),
+                        GLOBAL_CONFIG.get('smokeMidiCC', 1),
+                        GLOBAL_CONFIG.get('smokeIntensity', 127)))
+                    return True
+                except Exception as e:
+                    logger.error("Failed to open MIDI port {}: {}".format(port_id, e))
+                    midi_initialized = False
+                    return False
             else:
                 logger.error("No MIDI output ports found")
                 return False
@@ -304,15 +336,23 @@ def init_midi():
 
 def start_smoke(intensity=None, duration=None):
     """Start smoke machine via MIDI"""
-    global smoke_running, smoke_stop_timer
+    global smoke_running, smoke_stop_timer, midi_initialized, midi_port
     
     if not GLOBAL_CONFIG.get('smokeEnabled', False):
         logger.warning("Smoke control is disabled in config")
         return False
     
-    if not init_midi():
-        logger.error("Cannot start smoke - MIDI not initialized")
-        return False
+    # Ensure pygame.midi is initialized (but don't call init_midi() which does quit/init)
+    if MIDI_TYPE == 'pygame':
+        if not pygame.midi.get_init():
+            logger.info("pygame.midi not initialized, initializing now")
+            pygame.midi.init()
+        midi_initialized = True  # Mark as initialized (whether we just initialized or it was already initialized)
+    elif not midi_initialized:
+        # For mido, use init_midi()
+        if not init_midi():
+            logger.error("Cannot start smoke - MIDI not initialized")
+            return False
     
     if smoke_running:
         logger.info("Smoke already running")
@@ -321,20 +361,100 @@ def start_smoke(intensity=None, duration=None):
     try:
         channel = GLOBAL_CONFIG.get('smokeMidiChannel', 0)
         cc = GLOBAL_CONFIG.get('smokeMidiCC', 1)
-        intensity = intensity if intensity is not None else GLOBAL_CONFIG.get('smokeIntensity', 120)
+        intensity = intensity if intensity is not None else GLOBAL_CONFIG.get('smokeIntensity', 127)
         duration = duration if duration is not None else GLOBAL_CONFIG.get('smokeDuration', 3.0)
-        
+
+        logger.info("Starting smoke: Channel={}, CC={}, Intensity={}, Duration={}s".format(
+            channel, cc, intensity, duration))
+
         # Send MIDI CC message based on MIDI library type
         if MIDI_TYPE == 'mido':
             # mido: use Message class (Python 3, preferred)
             msg = mido.Message('control_change', channel=channel, control=cc, value=intensity)
             midi_port.send(msg)
+            logger.info("Sent MIDI CC message: channel={}, control={}, value={}".format(channel, cc, intensity))
         elif MIDI_TYPE == 'pygame':
             # pygame.midi: status byte = 0xB0 + channel, then control, value
-            midi_out = pygame.midi.Output(midi_port)
-            status = 0xB0 + channel
-            midi_out.write_short(status, cc, intensity)
-            midi_out.close()
+            # Always find and open port fresh each time (like test script)
+            try:
+                # Ensure pygame.midi is initialized
+                if not pygame.midi.get_init():
+                    logger.info("pygame.midi not initialized, initializing now")
+                    pygame.midi.init()
+                
+                # Find output ports
+                output_ports = []
+                port_count = pygame.midi.get_count()
+                logger.info("Scanning {} MIDI devices for output ports (smoke start)".format(port_count))
+                for i in range(port_count):
+                    info = pygame.midi.get_device_info(i)
+                    if info[3]:  # is_output
+                        port_display = info[1].decode('utf-8', errors='ignore')
+                        output_ports.append((i, port_display))
+                        logger.info("Found output port {}: {} (device ID: {})".format(len(output_ports)-1, port_display, i))
+                
+                logger.info("Found {} output port(s) for smoke start".format(len(output_ports)))
+                
+                # Use port at index 1 (second output port) if available, matching test script "port_name 1"
+                if len(output_ports) > 1:
+                    port_id = output_ports[1][0]  # Use second output port (index 1)
+                    port_display = output_ports[1][1]
+                    logger.info("Using port at index 1 (second output port) for smoke start: {} (device ID: {})".format(port_display, port_id))
+                elif len(output_ports) > 0:
+                    port_id = output_ports[0][0]
+                    port_display = output_ports[0][1]
+                    logger.warning("Only one output port found for smoke start, using: {} (device ID: {})".format(port_display, port_id))
+                else:
+                    raise Exception("No MIDI output ports available")
+                
+                logger.info("Opening MIDI port {} (device ID: {}) for smoke start".format(port_display, port_id))
+                # Open port, send message, close immediately (like test script)
+                try:
+                    midi_out = pygame.midi.Output(port_id)
+                    status = 0xB0 + channel
+                    midi_out.write_short(status, cc, intensity)
+                    logger.info("Sent MIDI CC via pygame.midi: channel={}, control={}, value={}".format(channel, cc, intensity))
+                    midi_out.close()
+                except Exception as e:
+                    logger.error("Error opening/sending MIDI via pygame.midi: {}".format(e))
+                    # Try to reinitialize and retry
+                    logger.info("Attempting to reinitialize MIDI and retry start")
+                    try:
+                        pygame.midi.quit()
+                    except:
+                        pass
+                    pygame.midi.init()
+                    midi_initialized = True
+                    
+                    # Re-find port after re-init
+                    output_ports = []
+                    for i in range(pygame.midi.get_count()):
+                        info = pygame.midi.get_device_info(i)
+                        if info[3]:  # is_output
+                            port_display = info[1].decode('utf-8', errors='ignore')
+                            output_ports.append((i, port_display))
+                    
+                    # Use port at index 1 (second output port) if available
+                    if len(output_ports) > 1:
+                        port_id = output_ports[1][0]  # Use second output port (index 1)
+                        port_display = output_ports[1][1]
+                    elif len(output_ports) > 0:
+                        port_id = output_ports[0][0]
+                        port_display = output_ports[0][1]
+                    else:
+                        raise Exception("No MIDI output ports available after reinit")
+                    
+                    logger.info("Retry: Opening MIDI port {} (device ID: {}) for smoke start".format(port_display, port_id))
+                    midi_out = pygame.midi.Output(port_id)
+                    status = 0xB0 + channel
+                    midi_out.write_short(status, cc, intensity)
+                    logger.info("Successfully sent MIDI CC after reinitialization: channel={}, control={}, value={}".format(channel, cc, intensity))
+                    midi_out.close()
+            except Exception as e:
+                logger.error("Error sending MIDI via pygame.midi: {}".format(e))
+                # Mark MIDI as uninitialized to force re-init on next attempt
+                midi_initialized = False
+                raise
         
         smoke_running = True
         
@@ -342,8 +462,10 @@ def start_smoke(intensity=None, duration=None):
             channel, cc, intensity, duration))
         
         # Schedule stop
-        smoke_stop_timer = threading.Timer(duration, stop_smoke)
+        logger.info("Scheduling smoke stop timer for {} seconds".format(duration))
+        smoke_stop_timer = threading.Timer(duration, lambda: (logger.info("Smoke stop timer fired!"), stop_smoke()))
         smoke_stop_timer.start()
+        logger.info("Smoke stop timer started, will fire in {} seconds".format(duration))
         
         return True
         
@@ -354,24 +476,122 @@ def start_smoke(intensity=None, duration=None):
 
 def stop_smoke():
     """Stop smoke machine via MIDI"""
-    global smoke_running, smoke_stop_timer
+    global smoke_running, smoke_stop_timer, midi_initialized, midi_port
+    
+    logger.info("stop_smoke() called, smoke_running={}".format(smoke_running))
     
     if not smoke_running:
+        logger.info("Smoke already stopped")
         return True
     
     try:
+        # Only initialize MIDI if not already initialized
+        # This avoids unnecessary quit/init cycles that can invalidate port IDs
+        if not midi_initialized:
+            if not init_midi():
+                logger.error("Cannot stop smoke - MIDI not initialized")
+                return False
+        elif MIDI_TYPE == 'pygame':
+            # Ensure pygame.midi is still initialized
+            if not pygame.midi.get_init():
+                logger.warning("pygame.midi was uninitialized, re-initializing")
+                midi_initialized = False
+                if not init_midi():
+                    logger.error("Cannot stop smoke - MIDI re-initialization failed")
+                    return False
+        
         channel = GLOBAL_CONFIG.get('smokeMidiChannel', 0)
         cc = GLOBAL_CONFIG.get('smokeMidiCC', 1)
+        
+        logger.info("Stopping smoke: Channel={}, CC={}, sending value=0".format(channel, cc))
         
         # Send MIDI CC message with value 0
         if MIDI_TYPE == 'mido':
             msg = mido.Message('control_change', channel=channel, control=cc, value=0)
             midi_port.send(msg)
+            logger.info("Sent MIDI CC stop message via mido: channel={}, control={}, value=0".format(channel, cc))
         elif MIDI_TYPE == 'pygame':
-            midi_out = pygame.midi.Output(midi_port)
-            status = 0xB0 + channel
-            midi_out.write_short(status, cc, 0)
-            midi_out.close()
+            # Always find and open port fresh each time (like test script)
+            try:
+                # Ensure pygame.midi is initialized
+                if not pygame.midi.get_init():
+                    logger.info("pygame.midi not initialized, initializing now")
+                    pygame.midi.init()
+                
+                # Find output ports
+                output_ports = []
+                port_count = pygame.midi.get_count()
+                logger.info("Scanning {} MIDI devices for output ports (smoke stop)".format(port_count))
+                for i in range(port_count):
+                    info = pygame.midi.get_device_info(i)
+                    if info[3]:  # is_output
+                        port_display = info[1].decode('utf-8', errors='ignore')
+                        output_ports.append((i, port_display))
+                        logger.info("Found output port {}: {} (device ID: {})".format(len(output_ports)-1, port_display, i))
+                
+                logger.info("Found {} output port(s) for smoke stop".format(len(output_ports)))
+                
+                # Use port at index 1 (second output port) if available, matching test script "port_name 1"
+                if len(output_ports) > 1:
+                    port_id = output_ports[1][0]  # Use second output port (index 1)
+                    port_display = output_ports[1][1]
+                    logger.info("Using port at index 1 (second output port) for smoke stop: {} (device ID: {})".format(port_display, port_id))
+                elif len(output_ports) > 0:
+                    port_id = output_ports[0][0]
+                    port_display = output_ports[0][1]
+                    logger.warning("Only one output port found for smoke stop, using: {} (device ID: {})".format(port_display, port_id))
+                else:
+                    raise Exception("No MIDI output ports available")
+                
+                logger.info("Opening MIDI port {} (device ID: {}) for smoke stop".format(port_display, port_id))
+                # Open port, send message, close immediately (like test script)
+                midi_out = pygame.midi.Output(port_id)
+                status = 0xB0 + channel
+                midi_out.write_short(status, cc, 0)
+                logger.info("Sent MIDI CC stop message via pygame.midi: channel={}, control={}, value=0".format(channel, cc))
+                midi_out.close()
+            except Exception as e:
+                logger.error("Error sending MIDI stop via pygame.midi: {}".format(e))
+                import traceback
+                logger.error(traceback.format_exc())
+                # Try to reinitialize and send again
+                logger.info("Attempting to reinitialize MIDI and retry stop")
+                # Force reinitialize pygame.midi
+                try:
+                    pygame.midi.quit()
+                except:
+                    pass
+                pygame.midi.init()
+                midi_initialized = True
+                
+                try:
+                    # Re-find port after re-init - use port index 1 (second output port)
+                    output_ports = []
+                    for i in range(pygame.midi.get_count()):
+                        info = pygame.midi.get_device_info(i)
+                        if info[3]:  # is_output
+                            port_display = info[1].decode('utf-8', errors='ignore')
+                            output_ports.append((i, port_display))
+                    
+                    # Use port at index 1 (second output port) if available
+                    if len(output_ports) > 1:
+                        port_id = output_ports[1][0]  # Use second output port (index 1)
+                        port_display = output_ports[1][1]
+                    elif len(output_ports) > 0:
+                        port_id = output_ports[0][0]
+                        port_display = output_ports[0][1]
+                    else:
+                        raise Exception("No MIDI output ports available after reinit")
+                    
+                    logger.info("Retry: Opening MIDI port {} (device ID: {}) for smoke stop".format(port_display, port_id))
+                    midi_out = pygame.midi.Output(port_id)
+                    status = 0xB0 + channel
+                    midi_out.write_short(status, cc, 0)
+                    logger.info("Successfully sent stop message after reinitialization")
+                    midi_out.close()
+                except Exception as e2:
+                    logger.error("Still failed to send stop after reinitialization: {}".format(e2))
+                    raise
         
         smoke_running = False
         
@@ -379,11 +599,15 @@ def stop_smoke():
             smoke_stop_timer.cancel()
             smoke_stop_timer = None
         
-        logger.info("Smoke stopped")
+        logger.info("Smoke stopped successfully")
         return True
         
     except Exception as e:
         logger.error("Failed to stop smoke: {}".format(e))
+        import traceback
+        logger.error(traceback.format_exc())
+        # Still set smoke_running to False even if MIDI fails
+        smoke_running = False
         return False
 
 def init_gpio():
@@ -999,27 +1223,46 @@ def handle_request(conn, addr):
                 return
             
             elif parsed_path.path == '/control_smoke':
+                logger.info("Received smoke control request: {}".format(post_data))
                 action = post_data.get('action', '')
                 intensity = post_data.get('intensity', None)
                 duration = post_data.get('duration', None)
                 
-                if action == 'start':
-                    success = start_smoke(intensity=intensity, duration=duration)
-                    response_data = json.dumps({'success': success, 'smoke_running': smoke_running})
-                elif action == 'stop':
-                    success = stop_smoke()
-                    response_data = json.dumps({'success': success, 'smoke_running': smoke_running})
-                elif action == 'test':
-                    # Test smoke for 2 seconds
-                    success = start_smoke(intensity=120, duration=2.0)
-                    response_data = json.dumps({'success': success, 'smoke_running': smoke_running, 'test': True})
-                else:
-                    response_data = json.dumps({'success': False, 'error': 'Invalid action. Use "start", "stop", or "test"'})
+                logger.info("Smoke control: action={}, intensity={}, duration={}, smokeEnabled={}".format(
+                    action, intensity, duration, GLOBAL_CONFIG.get('smokeEnabled', False)))
                 
-                response = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\n\r\n{}".format(len(response_data), response_data)
-                conn.sendall(response.encode('utf-8'))
-                conn.close()
-                return
+                try:
+                    if action == 'start':
+                        success = start_smoke(intensity=intensity, duration=duration)
+                        logger.info("Smoke start result: success={}, smoke_running={}".format(success, smoke_running))
+                        response_data = json.dumps({'success': success, 'smoke_running': smoke_running})
+                    elif action == 'stop':
+                        success = stop_smoke()
+                        logger.info("Smoke stop result: success={}, smoke_running={}".format(success, smoke_running))
+                        response_data = json.dumps({'success': success, 'smoke_running': smoke_running})
+                    elif action == 'test':
+                        # Test smoke for 2 seconds
+                        logger.info("Smoke test requested")
+                        success = start_smoke(intensity=127, duration=2.0)
+                        logger.info("Smoke test result: success={}, smoke_running={}".format(success, smoke_running))
+                        response_data = json.dumps({'success': success, 'smoke_running': smoke_running, 'test': True})
+                    else:
+                        logger.warning("Invalid smoke action: {}".format(action))
+                        response_data = json.dumps({'success': False, 'error': 'Invalid action. Use "start", "stop", or "test"'})
+                    
+                    response = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\n\r\n{}".format(len(response_data), response_data)
+                    conn.sendall(response.encode('utf-8'))
+                    conn.close()
+                    return
+                except Exception as e:
+                    logger.error("Error in smoke control: {}".format(e))
+                    import traceback
+                    logger.error(traceback.format_exc())
+                    response_data = json.dumps({'success': False, 'smoke_running': smoke_running, 'error': str(e)})
+                    response = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\n\r\n{}".format(len(response_data), response_data)
+                    conn.sendall(response.encode('utf-8'))
+                    conn.close()
+                    return
             
             elif parsed_path.path == '/motor_step':
                 # Fine motor control: step motors individually

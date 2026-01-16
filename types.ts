@@ -92,10 +92,10 @@ export const DEFAULT_CONFIG: SimulationConfig = {
   fanSpeed: 100,
   fanEnabled: true, // Default to enabled for 3-wire fan
   smokeEnabled: false,
-  smokeIntensity: 120,
+  smokeIntensity: 127, // Full intensity for DOREMiDi MTD-10
   smokeDuration: 3.0,
-  smokeMidiChannel: 1,
-  smokeMidiCC: 1,
+  smokeMidiChannel: 0, // MIDI Channel 0 (0-based) = Channel 1 (1-based)
+  smokeMidiCC: 1, // CC number 1
   // Default motor positions (will be set via calibration)
   motorADipPosition: 200,
   motorBDipPosition: -200,
