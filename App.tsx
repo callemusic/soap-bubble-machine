@@ -440,7 +440,8 @@ const App: React.FC = () => {
 
       case 'fan':
         if (block.action === 'start') {
-          const fanSpeed = block.config?.fanSpeed || config.fanSpeed;
+          // Always use current slider value, not the block's stored config
+          const fanSpeed = config.fanSpeed;
           if (piIp && isPiOnline) {
             // Don't await - execute immediately for accurate timing
             fetch(`http://${piIp}:8080/update_config`, {
