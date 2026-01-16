@@ -535,11 +535,12 @@ const App: React.FC = () => {
       scheduledActionsRef.current.clear();
 
       // Start fan if enabled (always on during loop)
+      // Only send fanEnabled and fanSpeed to avoid sending full config that might have fanEnabled: false
       if (config.fanEnabled && piIp && isPiOnline) {
         fetch(`http://${piIp}:8080/update_config`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ ...config, fanEnabled: true, fanSpeed: config.fanSpeed }),
+          body: JSON.stringify({ fanEnabled: true, fanSpeed: config.fanSpeed }),
         })
         .then(() => setFanRunning(true))
         .catch(e => console.error("Failed to start fan on loop start:", e));

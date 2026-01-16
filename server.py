@@ -1207,8 +1207,10 @@ def handle_request(conn, addr):
                         logger.error("Failed to update fan speed: {}".format(e))
                 
                 # Handle explicit fan stop (fanEnabled: false with fanSpeed: 0 or just fanEnabled: false)
-                if 'fanEnabled' in post_data and not GLOBAL_CONFIG['fanEnabled']:
-                    if fan_pwm and fan_running:
+                # Only stop fan if fanEnabled is explicitly set to false AND fan is currently running
+                # Don't stop if fanEnabled was already false (might be from auto-save or other updates)
+                if 'fanEnabled' in post_data and not GLOBAL_CONFIG['fanEnabled'] and fan_running:
+                    if fan_pwm:
                         fan_pwm.ChangeDutyCycle(0)
                         fan_running = False
                         logger.info("Fan stopped (fanEnabled set to false)")
