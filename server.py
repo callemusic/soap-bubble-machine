@@ -48,7 +48,7 @@ DEFAULT_CONFIG = {
     'fanSpeed': 100,
     'fanEnabled': True,  # Default enabled for 3-wire fan
     'smokeEnabled': False,
-    'smokeIntensity': 127,  # MIDI CC value (0-127) - full intensity for DOREMiDi MTD-10
+    'smokeIntensity': 102,  # MIDI CC value (0-127) - 80% intensity (102/127 ≈ 80%) for DOREMiDi MTD-10
     'smokeDuration': 3.0,
     'smokeMidiChannel': 0,  # MIDI Channel 0 (0-based) = Channel 1 (1-based) - matches test_midi_smoke.py
     'smokeMidiCC': 1,  # CC number 1 - matches test_midi_smoke.py
@@ -317,7 +317,7 @@ def init_midi():
                         port_display, port_id,
                         GLOBAL_CONFIG.get('smokeMidiChannel', 0),
                         GLOBAL_CONFIG.get('smokeMidiCC', 1),
-                        GLOBAL_CONFIG.get('smokeIntensity', 127)))
+                        GLOBAL_CONFIG.get('smokeIntensity', 102)))
                     return True
                 except Exception as e:
                     logger.error("Failed to open MIDI port {}: {}".format(port_id, e))
@@ -361,7 +361,7 @@ def start_smoke(intensity=None, duration=None):
     try:
         channel = GLOBAL_CONFIG.get('smokeMidiChannel', 0)
         cc = GLOBAL_CONFIG.get('smokeMidiCC', 1)
-        intensity = intensity if intensity is not None else GLOBAL_CONFIG.get('smokeIntensity', 127)
+        intensity = intensity if intensity is not None else GLOBAL_CONFIG.get('smokeIntensity', 102)
         duration = duration if duration is not None else GLOBAL_CONFIG.get('smokeDuration', 3.0)
 
         logger.info("Starting smoke: Channel={}, CC={}, Intensity={}, Duration={}s".format(
