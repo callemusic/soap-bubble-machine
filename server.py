@@ -1195,13 +1195,10 @@ def handle_request(conn, addr):
                         duty_cycle = map_fan_speed(slider_speed)
                         if fan_should_start:
                             # Start fan at specified speed (from timeline fan start block)
-                            # Give a brief kick to 100% to help it start faster, then set target speed
-                            if duty_cycle > 0:
-                                fan_pwm.ChangeDutyCycle(100)  # Brief kick to full speed for faster startup
-                                time.sleep(0.1)  # 100ms kick to ensure fan starts spinning
+                            # Use slider value directly - no kick
                             fan_pwm.ChangeDutyCycle(duty_cycle)
                             fan_running = True
-                            logger.info("Fan started at {}% PWM (from timeline, with quick start kick)".format(duty_cycle))
+                            logger.info("Fan started at {}% PWM (from timeline, slider value: {})".format(duty_cycle, slider_speed))
                         elif fan_running:
                             # Fan is running, update speed immediately
                             fan_pwm.ChangeDutyCycle(duty_cycle)
