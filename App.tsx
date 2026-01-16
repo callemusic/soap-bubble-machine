@@ -439,31 +439,8 @@ const App: React.FC = () => {
         break;
 
       case 'fan':
-        if (block.action === 'start') {
-          // Always use current slider value, not the block's stored config
-          const fanSpeed = config.fanSpeed;
-          if (piIp && isPiOnline) {
-            // Don't await - execute immediately for accurate timing
-            fetch(`http://${piIp}:8080/update_config`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ ...config, fanEnabled: true, fanSpeed }),
-            })
-            .then(() => setFanRunning(true))
-            .catch(e => console.error("Failed to start fan:", e));
-          }
-        } else {
-          if (piIp && isPiOnline) {
-            // Don't await - execute immediately for accurate timing
-            fetch(`http://${piIp}:8080/update_config`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ ...config, fanEnabled: false }),
-            })
-            .then(() => setFanRunning(false))
-            .catch(e => console.error("Failed to stop fan:", e));
-          }
-        }
+        // Skip fan blocks - fan is controlled by toggle and stays on during loop if enabled
+        console.log(`Skipping fan block ${block.id} - fan is controlled by toggle (always on if enabled)`);
         break;
 
       case 'smoke':
@@ -556,6 +533,17 @@ const App: React.FC = () => {
       isRunningRef.current = true; // Update ref for interval callbacks
       setCurrentPlaybackTime(0);
       scheduledActionsRef.current.clear();
+
+      // Start fan if enabled (always on during loop)
+      if (config.fanEnabled && piIp && isPiOnline) {
+        fetch(`http://${piIp}:8080/update_config`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ...config, fanEnabled: true, fanSpeed: config.fanSpeed }),
+        })
+        .then(() => setFanRunning(true))
+        .catch(e => console.error("Failed to start fan on loop start:", e));
+      }
 
       // Schedule all blocks
       allBlocks.forEach(({ block, startTime }) => {
