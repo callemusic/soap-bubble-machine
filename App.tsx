@@ -2,7 +2,8 @@
 import React, { useState, useEffect, useRef } from 'react';
 import Schematic from './components/Schematic';
 import ControlPanel from './components/ControlPanel';
-import { MachineState, DEFAULT_PINS, SimulationConfig, DEFAULT_CONFIG } from './types';
+import MultiTrackTimeline from './components/MultiTrackTimeline';
+import { MachineState, DEFAULT_PINS, SimulationConfig, DEFAULT_CONFIG, TimelineBlock } from './types';
 import { Globe, Zap } from 'lucide-react';
 
 const App: React.FC = () => {
@@ -17,8 +18,73 @@ const App: React.FC = () => {
   const [motorAPosition, setMotorAPosition] = useState<number>(0);
   const [motorBPosition, setMotorBPosition] = useState<number>(0);
   const [movementDuration, setMovementDuration] = useState<number>(0);
+  const [currentTimelineIndex, setCurrentTimelineIndex] = useState<number>(0);
+  const [currentPlaybackTime, setCurrentPlaybackTime] = useState<number>(0);
   
-  const timeoutRef = useRef<any>(null);
+  const timeoutRefs = useRef<Map<string, any>>(new Map()); // Store all timeout refs by block ID
+  const playbackIntervalRef = useRef<any>(null);
+  const scheduledActionsRef = useRef<Map<number, TimelineBlock[]>>(new Map());
+  const configLoadedRef = useRef<boolean>(false); // Track if config was just loaded from server
+  const isRunningRef = useRef<boolean>(false); // Track running state for interval callbacks
+
+  // Ensure loopTimeline is initialized
+  useEffect(() => {
+    if (!config.loopTimeline || config.loopTimeline.length === 0) {
+      setConfig({
+        ...config,
+        loopTimeline: DEFAULT_CONFIG.loopTimeline,
+        loopDuration: DEFAULT_CONFIG.loopDuration,
+      });
+    }
+  }, []);
+
+  // Auto-save timeline changes to server (debounced)
+  useEffect(() => {
+    if (!piIp || !isPiOnline || configLoadedRef.current) return;
+    
+    // Skip if this is the initial load (config just loaded from server)
+    const timeoutId = setTimeout(async () => {
+      try {
+        await fetch(`http://${piIp}:8080/update_config`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            loopTimeline: config.loopTimeline,
+            loopDuration: config.loopDuration,
+          }),
+        });
+      } catch (e) {
+        console.error("Failed to save timeline to server:", e);
+      }
+    }, 1000); // Debounce: save 1 second after last change
+    
+    return () => clearTimeout(timeoutId);
+  }, [config.loopTimeline, config.loopDuration, piIp, isPiOnline]);
+
+  // Load config from server when Pi comes online
+  useEffect(() => {
+    if (piIp && isPiOnline && !configLoadedRef.current) {
+      const loadConfig = async () => {
+        try {
+          const res = await fetch(`http://${piIp}:8080/get_config`, { signal: AbortSignal.timeout(2000) });
+          if (res.ok) {
+            const data = await res.json();
+            if (data.success && data.config) {
+              configLoadedRef.current = true;
+              setConfig(data.config as SimulationConfig);
+              // Reset flag after a delay to allow auto-save to work
+              setTimeout(() => {
+                configLoadedRef.current = false;
+              }, 2000);
+            }
+          }
+        } catch (e) {
+          console.error("Failed to load config from server:", e);
+        }
+      };
+      loadConfig();
+    }
+  }, [piIp, isPiOnline]);
 
   // Heartbeat check for Pi
   useEffect(() => {
@@ -45,27 +111,123 @@ const App: React.FC = () => {
     return () => clearInterval(interval);
   }, [piIp]);
 
-  const stopSimulation = () => {
-    if (timeoutRef.current) {
-      clearTimeout(timeoutRef.current);
-    }
+  const stopSimulation = async (skipOpen = false) => {
+    console.log("stopSimulation called, skipOpen:", skipOpen);
+    
+    // Set running to false FIRST to prevent any new blocks from executing
     setIsRunning(false);
-    setMachineState(MachineState.IDLE);
+    isRunningRef.current = false; // Update ref immediately for interval callbacks
+    
+    // Clear all scheduled timeouts
+    timeoutRefs.current.forEach((timeout, blockId) => {
+      if (timeout) {
+        console.log(`Clearing timeout for block: ${blockId}`);
+        clearTimeout(timeout);
+      }
+    });
+    timeoutRefs.current.clear();
+    
+    if (playbackIntervalRef.current) {
+      console.log("Clearing playback interval");
+      clearInterval(playbackIntervalRef.current);
+      playbackIntervalRef.current = null;
+    }
+    
+    setCurrentTimelineIndex(0);
+    setCurrentPlaybackTime(0);
+    scheduledActionsRef.current.clear();
+    
+    console.log("All timeouts and intervals cleared, isRunning set to false");
     
     if (piIp && isPiOnline) {
-      sendRemoteCommand(MachineState.IDLE);
+      if (!skipOpen) {
+        // Stop smoke first if running
+        if (smokeRunning) {
+          try {
+            await fetch(`http://${piIp}:8080/control_smoke`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ action: 'stop' }),
+            });
+            setSmokeRunning(false);
+            console.log("Stopped smoke machine");
+          } catch (e) {
+            console.error("Failed to stop smoke:", e);
+          }
+        }
+        
+        // Turn off fan
+        try {
+          await fetch(`http://${piIp}:8080/update_config`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ fanEnabled: false }),
+          });
+          setFanRunning(false);
+          console.log("Stopped fan");
+        } catch (e) {
+          console.error("Failed to stop fan:", e);
+        }
+        
+        // Always send OPEN command - let server decide if movement is needed
+        // This ensures arms return to home even if client-side position is stale
+        // Wait a bit for fan/smoke to stop, then move arms
+        await new Promise(resolve => setTimeout(resolve, 100)); // Small delay to let fan/smoke stop
+        
+        try {
+          console.log("Sending OPEN command to return arms to home position");
+          await sendRemoteCommand(MachineState.OPEN);
+          setMachineState(MachineState.OPEN);
+          console.log("OPEN command completed");
+        } catch (e) {
+          console.error("Failed to move arms to OPEN:", e);
+          setMachineState(MachineState.IDLE);
+        }
+      } else {
+        // Still stop fan and smoke even if skipping OPEN
+        if (smokeRunning) {
+          try {
+            await fetch(`http://${piIp}:8080/control_smoke`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ action: 'stop' }),
+            });
+            setSmokeRunning(false);
+          } catch (e) {
+            console.error("Failed to stop smoke:", e);
+          }
+        }
+        
+        try {
+          await fetch(`http://${piIp}:8080/update_config`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ fanEnabled: false }),
+          });
+          setFanRunning(false);
+        } catch (e) {
+          console.error("Failed to stop fan:", e);
+        }
+      }
+    } else {
+      setMachineState(MachineState.IDLE);
     }
   };
 
   const sendRemoteCommand = async (state: MachineState) => {
     if (!piIp) return;
     try {
+      console.log(`Sending remote command: ${state}`);
       const response = await fetch(`http://${piIp}:8080/set_state`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ state }),
       });
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
       const data = await response.json();
+      console.log(`Command ${state} response:`, data);
       // Update motor positions immediately if returned
       if (data.success && data.motor_a_position !== undefined && data.motor_b_position !== undefined) {
         setMotorAPosition(data.motor_a_position);
@@ -81,6 +243,7 @@ const App: React.FC = () => {
       }
     } catch (e) {
       console.error("Failed to send command to Pi:", e);
+      throw e; // Re-throw so caller knows it failed
     }
   };
 
@@ -207,47 +370,225 @@ const App: React.FC = () => {
     }
   };
 
-  const runSequenceStep = (step: MachineState) => {
-    setMachineState(step);
-    if (piIp && isPiOnline) sendRemoteCommand(step);
-
-    let nextStep: MachineState = MachineState.IDLE;
-    let waitDuration = 1000; // Wait time after movement completes
-
-    switch (step) {
-      case MachineState.OPEN:
-        // After OPEN, wait then go to CLOSE
-        nextStep = MachineState.CLOSE;
-        waitDuration = config.waitAfterOpen * 1000;
+  const executeBlock = (block: TimelineBlock) => {
+    // Check if still running before executing (use ref for reliability)
+    if (!isRunningRef.current) {
+      console.log(`executeBlock: Skipping ${block.id} (${block.action}) - loop is stopped`);
+      return;
+    }
+    
+    console.log(`executeBlock: Executing ${block.id} (${block.action})`);
+    // Execute block immediately without awaiting (non-blocking)
+    switch (block.type) {
+      case 'motor':
+        const motorState = block.action as MachineState;
+        setMachineState(motorState);
+        
+        // Calculate duration BEFORE updating position (needs current position)
+        const motorDuration = calculateMovementDuration(motorState);
+        setMovementDuration(motorDuration);
+        
+        // Update expected motor positions immediately so next block calculates correctly
+        let targetA = motorAPosition;
+        let targetB = motorBPosition;
+        switch (motorState) {
+          case MachineState.DIP:
+            targetA = config.motorADipPosition || 200;
+            targetB = config.motorBDipPosition || -200;
+            break;
+          case MachineState.OPEN:
+          case MachineState.HOME:
+            // OPEN/HOME always goes to (0, 0) - home position
+            targetA = 0;
+            targetB = 0;
+            break;
+          case MachineState.CLOSE:
+            targetA = config.motorAClosePosition || 200;
+            targetB = config.motorBClosePosition || -200;
+            break;
+        }
+        // Update position state immediately so next block calculates from correct position
+        setMotorAPosition(targetA);
+        setMotorBPosition(targetB);
+        
+        if (piIp && isPiOnline) {
+          // Don't await - let motor movement happen in background
+          sendRemoteCommand(motorState).catch(e => {
+            console.error("Failed to send motor command:", e);
+          });
+        }
+        // Motor block duration represents wait time after movement
+        // The actual movement duration is calculated, then we wait for block.duration
+        // This is handled by the timeline's startTime positioning
         break;
-      case MachineState.CLOSE:
-        // After CLOSE, wait then go to DIP
-        nextStep = MachineState.DIP;
-        waitDuration = config.waitAfterClose * 1000;
+
+      case 'fan':
+        if (block.action === 'start') {
+          const fanSpeed = block.config?.fanSpeed || config.fanSpeed;
+          if (piIp && isPiOnline) {
+            // Don't await - execute immediately for accurate timing
+            fetch(`http://${piIp}:8080/update_config`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ ...config, fanEnabled: true, fanSpeed }),
+            })
+            .then(() => setFanRunning(true))
+            .catch(e => console.error("Failed to start fan:", e));
+          }
+        } else {
+          if (piIp && isPiOnline) {
+            // Don't await - execute immediately for accurate timing
+            fetch(`http://${piIp}:8080/update_config`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ ...config, fanEnabled: false }),
+            })
+            .then(() => setFanRunning(false))
+            .catch(e => console.error("Failed to stop fan:", e));
+          }
+        }
         break;
-      case MachineState.DIP:
-        // After DIP, wait then go to OPEN
-        nextStep = MachineState.OPEN;
-        waitDuration = config.waitAfterDip * 1000;
+
+      case 'smoke':
+        if (block.action === 'start') {
+          const smokeIntensity = block.config?.smokeIntensity || config.smokeIntensity;
+          if (piIp && isPiOnline) {
+            // Don't await - execute immediately for accurate timing
+            fetch(`http://${piIp}:8080/control_smoke`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                action: 'start',
+                intensity: smokeIntensity,
+                duration: block.duration,
+              }),
+            })
+            .then(() => setSmokeRunning(true))
+            .catch(e => console.error("Failed to start smoke:", e));
+          }
+        } else {
+          if (piIp && isPiOnline) {
+            // Don't await - execute immediately for accurate timing
+            fetch(`http://${piIp}:8080/control_smoke`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ action: 'stop' }),
+            })
+            .then(() => setSmokeRunning(false))
+            .catch(e => console.error("Failed to stop smoke:", e));
+          }
+        }
         break;
     }
-
-    // Calculate movement duration for the current step to add to wait time
-    const movementDuration = calculateMovementDuration(step);
-    const totalDuration = (movementDuration * 1000) + waitDuration;
-
-    timeoutRef.current = setTimeout(() => {
-        runSequenceStep(nextStep);
-    }, totalDuration);
   };
 
   const toggleRun = () => {
     if (isRunning) {
       stopSimulation();
     } else {
+      const timeline = config.loopTimeline || [];
+      if (timeline.length === 0) {
+        console.warn("No blocks in timeline");
+        return;
+      }
+
+      // Collect all blocks from all tracks and sort by startTime
+      const allBlocks: Array<{ block: TimelineBlock; startTime: number }> = [];
+      timeline.forEach(track => {
+        track.blocks.forEach(block => {
+          allBlocks.push({ block, startTime: block.startTime });
+        });
+      });
+      allBlocks.sort((a, b) => a.startTime - b.startTime);
+
+      if (allBlocks.length === 0) {
+        console.warn("No blocks in timeline tracks");
+        return;
+      }
+
+      // Calculate total loop duration
+      let maxEndTime = 0;
+      allBlocks.forEach(({ block }) => {
+        let duration = block.duration;
+        if (block.type === 'motor') {
+          // Motor duration = movement duration + wait duration
+          const movementDuration = calculateMovementDuration(block.action as MachineState);
+          duration = movementDuration + block.duration;
+        }
+        const endTime = block.startTime + duration;
+        if (endTime > maxEndTime) {
+          maxEndTime = endTime;
+        }
+      });
+
       setIsRunning(true);
-      // Start loop with OPEN state
-      runSequenceStep(MachineState.OPEN);
+      isRunningRef.current = true; // Update ref for interval callbacks
+      setCurrentPlaybackTime(0);
+      scheduledActionsRef.current.clear();
+
+      // Schedule all blocks
+      allBlocks.forEach(({ block, startTime }) => {
+        const scheduleTime = Math.round(startTime * 1000);
+        if (!scheduledActionsRef.current.has(scheduleTime)) {
+          scheduledActionsRef.current.set(scheduleTime, []);
+        }
+        scheduledActionsRef.current.get(scheduleTime)!.push(block);
+      });
+
+      // Store loop data for restart
+      const loopData = { allBlocks, maxEndTime };
+
+      // Update playhead every 100ms
+      playbackIntervalRef.current = setInterval(() => {
+        // Check running state using ref (more reliable than state in callbacks)
+        if (!isRunningRef.current) {
+          return; // Stop updating if not running
+        }
+        
+        setCurrentPlaybackTime(prev => {
+          const newTime = prev + 0.1;
+          // Check if we've reached the end of the loop
+          if (newTime >= loopData.maxEndTime) {
+            // Double-check we're still running before re-scheduling
+            if (isRunningRef.current) {
+              console.log("Loop completed, restarting blocks");
+              // Re-execute all blocks for next loop iteration
+              loopData.allBlocks.forEach(({ block, startTime }) => {
+                const scheduleTime = startTime * 1000; // Convert to milliseconds
+                const timeoutId = setTimeout(() => {
+                  // Final check before executing
+                  if (isRunningRef.current) {
+                    console.log(`Executing block ${block.id} (${block.action})`);
+                    executeBlock(block);
+                  } else {
+                    console.log(`Skipping block ${block.id} - loop stopped`);
+                  }
+                  timeoutRefs.current.delete(block.id);
+                }, scheduleTime);
+                timeoutRefs.current.set(block.id, timeoutId);
+              });
+            } else {
+              console.log("Loop end reached but not running, skipping restart");
+            }
+            return 0;
+          }
+          return newTime;
+        });
+      }, 100);
+
+      // Execute blocks at their scheduled times
+      // Use performance.now() for more accurate timing
+      const loopStartTime = performance.now();
+      allBlocks.forEach(({ block, startTime }) => {
+        const scheduleTime = startTime * 1000; // Convert to milliseconds
+        const timeoutId = setTimeout(() => {
+          // Execute block at exact startTime
+          executeBlock(block);
+          // Remove timeout ref after execution
+          timeoutRefs.current.delete(block.id);
+        }, scheduleTime);
+        timeoutRefs.current.set(block.id, timeoutId);
+      });
     }
   };
 
@@ -264,11 +605,12 @@ const App: React.FC = () => {
         targetA = config.motorADipPosition || 200;
         targetB = config.motorBDipPosition || -200;
         break;
-      case MachineState.OPEN:
-      case MachineState.HOME:
-        targetA = 0;
-        targetB = 0;
-        break;
+          case MachineState.OPEN:
+          case MachineState.HOME:
+            // OPEN/HOME always goes to (0, 0) - home position
+            targetA = 0;
+            targetB = 0;
+            break;
       case MachineState.CLOSE:
         targetA = config.motorAClosePosition || 200;
         targetB = config.motorBClosePosition || -200;
@@ -285,7 +627,7 @@ const App: React.FC = () => {
   };
 
   const handleManualState = (state: MachineState) => {
-    stopSimulation();
+    stopSimulation(true); // Skip OPEN command - we're switching to manual control
     
     // Calculate and set duration immediately for 1:1 animation
     const duration = calculateMovementDuration(state);
@@ -320,9 +662,23 @@ const App: React.FC = () => {
 
       <main className="flex-1 min-h-0 p-4 md:p-6 grid grid-cols-1 lg:grid-cols-12 gap-6 overflow-y-auto lg:overflow-hidden">
         
-        <div className="lg:col-span-8 flex flex-col h-[600px] lg:h-full min-h-0 bg-slate-900 rounded-xl border border-slate-800 shadow-2xl overflow-hidden relative">
-          <div className="absolute inset-0">
-             <Schematic activeState={machineState} fanSpeed={config.fanSpeed} fanEnabled={config.fanEnabled} fanRunning={fanRunning} highlight={null} motorAPosition={motorAPosition} motorBPosition={motorBPosition} movementDuration={movementDuration} />
+        <div className="lg:col-span-8 flex flex-col gap-4 h-full min-h-0">
+          <div className="flex-1 bg-slate-900 rounded-xl border border-slate-800 shadow-2xl overflow-hidden relative min-h-0">
+            <div className="absolute inset-0">
+               <Schematic activeState={machineState} fanSpeed={config.fanSpeed} fanEnabled={config.fanEnabled} fanRunning={fanRunning} highlight={null} motorAPosition={motorAPosition} motorBPosition={motorBPosition} movementDuration={movementDuration} />
+            </div>
+          </div>
+          
+          {/* Multi-Track Timeline */}
+          <div className="flex-none rounded-xl border border-slate-800 shadow-xl bg-slate-900 p-4">
+            <MultiTrackTimeline 
+              config={config}
+              setConfig={setConfig}
+              isRunning={isRunning}
+              motorAPosition={motorAPosition}
+              motorBPosition={motorBPosition}
+              currentTime={currentPlaybackTime}
+            />
           </div>
         </div>
 

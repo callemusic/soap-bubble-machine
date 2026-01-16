@@ -62,7 +62,36 @@ DEFAULT_CONFIG = {
     # Wait times between loop states (in seconds)
     'waitAfterOpen': 1.0,   # Wait after reaching OPEN before starting CLOSE
     'waitAfterClose': 1.0,  # Wait after reaching CLOSE before starting DIP
-    'waitAfterDip': 1.0     # Wait after reaching DIP before starting OPEN
+    'waitAfterDip': 1.0,    # Wait after reaching DIP before starting OPEN
+    # Multi-track timeline-based loop configuration
+    'loopTimeline': [
+        {
+            'id': 'track-motors',
+            'type': 'motors',
+            'name': 'Motors',
+            'blocks': [
+                {'id': 'm1', 'type': 'motor', 'action': 'OPEN', 'startTime': 0, 'duration': 0},
+                {'id': 'm2', 'type': 'motor', 'action': 'CLOSE', 'startTime': 2, 'duration': 0},
+                {'id': 'm3', 'type': 'motor', 'action': 'DIP', 'startTime': 4, 'duration': 0},
+            ],
+        },
+        {
+            'id': 'track-fan',
+            'type': 'fan',
+            'name': 'Fan',
+            'blocks': [
+                {'id': 'f1', 'type': 'fan', 'action': 'start', 'startTime': 6, 'duration': 3.0, 'config': {'fanSpeed': 100}},
+                {'id': 'f2', 'type': 'fan', 'action': 'stop', 'startTime': 9, 'duration': 0},
+            ],
+        },
+        {
+            'id': 'track-smoke',
+            'type': 'smoke',
+            'name': 'Smoke',
+            'blocks': [],
+        },
+    ],
+    'loopDuration': 10.0
 }
 
 def load_config():
@@ -77,6 +106,18 @@ def load_config():
                 # Merge with defaults to ensure all keys exist
                 config = DEFAULT_CONFIG.copy()
                 config.update(saved_config)
+                
+                # Ensure motor positions exist - if missing from saved config, keep defaults
+                # This prevents falling back to 200/-200 if positions were never saved
+                if 'motorADipPosition' not in saved_config:
+                    logger.warning("⚠ motorADipPosition not in saved config, using default: {}".format(config['motorADipPosition']))
+                if 'motorBDipPosition' not in saved_config:
+                    logger.warning("⚠ motorBDipPosition not in saved config, using default: {}".format(config['motorBDipPosition']))
+                if 'motorAClosePosition' not in saved_config:
+                    logger.warning("⚠ motorAClosePosition not in saved config, using default: {}".format(config['motorAClosePosition']))
+                if 'motorBClosePosition' not in saved_config:
+                    logger.warning("⚠ motorBClosePosition not in saved config, using default: {}".format(config['motorBClosePosition']))
+                
                 logger.info("Loaded config from {} - Motor positions: DIP(A={}, B={}), CLOSE(A={}, B={})".format(
                     config_path,
                     config.get('motorADipPosition', 200),
@@ -170,6 +211,10 @@ motor_continuous_running = False
 motor_continuous_direction = None
 motor_continuous_thread = None
 motor_continuous_stop_event = threading.Event()
+
+# Motor movement thread for non-blocking execution
+motor_movement_thread = None
+motor_movement_lock = threading.Lock()  # Lock to prevent overlapping motor movements
 
 # Fan PWM mapping: slider 0-100% maps to PWM duty cycle
 # For 3-wire fan with direct GPIO PWM control (no MOSFET)
@@ -365,8 +410,8 @@ def init_gpio():
     except Exception as e:
         logger.error("GPIO init error: {}".format(e))
 
-def move_motors_to_position(target_a, target_b, use_slow_in=False, slow_in_start_distance=100, use_slow_out=False, slow_out_start_distance=100):
-    """Move motors to target positions with optional slow-in and slow-out easing.
+def move_motors_to_position_sync(target_a, target_b, use_slow_in=False, slow_in_start_distance=100, use_slow_out=False, slow_out_start_distance=100):
+    """Synchronous motor movement (blocking) - used internally by async wrapper.
     
     Args:
         target_a: Target position for motor A
@@ -389,6 +434,9 @@ def move_motors_to_position(target_a, target_b, use_slow_in=False, slow_in_start
     steps_a = target_a - current_a
     steps_b = target_b - current_b
     
+    logger.info("move_motors_to_position_sync: Current (A: {}, B: {}), Target (A: {}, B: {}), Steps needed (A: {}, B: {})".format(
+        current_a, current_b, target_a, target_b, steps_a, steps_b))
+    
     # Base step delay (fastest speed)
     base_step_delay = 0.001  # seconds per half-step
     max_delay = 0.005  # Maximum delay for slow-in/slow-out (5x slower)
@@ -400,6 +448,11 @@ def move_motors_to_position(target_a, target_b, use_slow_in=False, slow_in_start
     # Motor B: HIGH = forward (increases position), LOW = backward (decreases position)
     dir_a = GPIO.HIGH if steps_a > 0 else GPIO.LOW  # HIGH = backward (increase), LOW = forward (decrease)
     dir_b = GPIO.HIGH if steps_b > 0 else GPIO.LOW  # HIGH = forward (increase), LOW = backward (decrease)
+    
+    logger.info("Movement: max_steps={}, dir_a={}, dir_b={}, Motor A will step {} times, Motor B will step {} times".format(
+        max_steps, "HIGH(backward)" if dir_a == GPIO.HIGH else "LOW(forward)", 
+        "HIGH(forward)" if dir_b == GPIO.HIGH else "LOW(backward)",
+        abs(steps_a), abs(steps_b)))
     
     GPIO.output(PINS['dirA'], dir_a)
     GPIO.output(PINS['dirB'], dir_b)
@@ -456,10 +509,30 @@ def move_motors_to_position(target_a, target_b, use_slow_in=False, slow_in_start
         time.sleep(step_delay)
         total_duration += step_delay
     
-    # Update positions
+    # Update positions - calculate actual final position based on steps taken
+    # This ensures we don't overshoot if one motor stops before the other
     with motor_position_lock:
+        # Calculate actual final position based on direction and steps taken
+        if steps_a > 0:
+            # Motor A moved backward (HIGH) - position increases
+            actual_a = current_a + abs(steps_a)
+        else:
+            # Motor A moved forward (LOW) - position decreases
+            actual_a = current_a - abs(steps_a)
+        
+        if steps_b > 0:
+            # Motor B moved forward (HIGH) - position increases
+            actual_b = current_b + abs(steps_b)
+        else:
+            # Motor B moved backward (LOW) - position decreases
+            actual_b = current_b - abs(steps_b)
+        
+        # Set to target (should match actual, but use target to ensure accuracy)
         motor_a_position = target_a
         motor_b_position = target_b
+        
+        logger.info("Position updated after movement: Set to target (A: {}, B: {}), Calculated actual (A: {}, B: {})".format(
+            target_a, target_b, actual_a, actual_b))
     
     easing_desc = []
     if use_slow_out:
@@ -471,6 +544,67 @@ def move_motors_to_position(target_a, target_b, use_slow_in=False, slow_in_start
     logger.info("Motors moved to target positions (A: {}, B: {}) in {:.2f}s{}".format(
         target_a, target_b, total_duration, easing_str))
     return total_duration
+
+def move_motors_to_position(target_a, target_b, use_slow_in=False, slow_in_start_distance=100, use_slow_out=False, slow_out_start_distance=100, force=False):
+    """Non-blocking motor movement - runs in background thread and returns immediately with estimated duration
+    
+    Args:
+        force: If True, interrupt any ongoing movement and start new one (for cleanup/stop scenarios)
+    """
+    global motor_movement_thread, motor_movement_lock
+    
+    # Check if a motor movement is already in progress
+    waited_for_previous = False
+    if motor_movement_thread and motor_movement_thread.is_alive():
+        if force:
+            # Force interrupt: wait for current movement to finish, then start new one
+            logger.warning("Motor movement in progress, forcing new movement (cleanup/stop) - waiting for completion")
+            try:
+                # Wait longer to ensure movement completes and position is updated
+                motor_movement_thread.join(timeout=3.0)  # Wait up to 3 seconds for current movement
+                waited_for_previous = True
+                logger.info("Previous movement thread finished, re-reading position")
+            except Exception as e:
+                logger.error("Error waiting for motor movement thread: {}".format(e))
+                # Continue anyway - start new movement
+        else:
+            logger.warning("Motor movement already in progress, ignoring new command")
+            return 0.0  # Return 0 duration if movement already in progress
+    
+    # Calculate estimated duration before starting (for immediate response)
+    # ALWAYS re-read position after checking for previous movement (it may have updated)
+    with motor_position_lock:
+        current_a = motor_a_position
+        current_b = motor_b_position
+    
+    if waited_for_previous:
+        logger.info("After waiting for previous movement, current position: A={}, B={}, new target: A={}, B={}".format(
+            current_a, current_b, target_a, target_b))
+    
+    steps_a = abs(target_a - current_a)
+    steps_b = abs(target_b - current_b)
+    max_steps = max(steps_a, steps_b)
+    base_step_delay = 0.001
+    estimated_duration = max_steps * base_step_delay * 2  # Rough estimate (will be refined by actual movement)
+    
+    def move_in_thread():
+        """Execute motor movement in background thread"""
+        try:
+            move_motors_to_position_sync(target_a, target_b, use_slow_in, slow_in_start_distance, use_slow_out, slow_out_start_distance)
+        except Exception as e:
+            logger.error("Error in motor movement thread: {}".format(e))
+        finally:
+            # Thread completes, can be reused
+            pass
+    
+    # Start motor movement in background thread
+    motor_movement_thread = threading.Thread(target=move_in_thread, daemon=True)
+    motor_movement_thread.start()
+    
+    logger.info("Motor movement started in background thread (target A: {}, B: {}), estimated duration: {:.2f}s".format(
+        target_a, target_b, estimated_duration))
+    
+    return estimated_duration  # Return immediately with estimated duration
 
 def continuous_motor_loop():
     """Background thread for smooth continuous motor stepping"""
@@ -618,6 +752,15 @@ def handle_request(conn, addr):
             conn.close()
             return
         
+        # Handle GET /get_config
+        if method == 'GET' and parsed_path.path == '/get_config':
+            response_data = json.dumps({'success': True, 'config': GLOBAL_CONFIG})
+            response = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\n\r\n{}".format(len(response_data), response_data)
+            conn.sendall(response.encode('utf-8'))
+            logger.info("Config requested, sent full config")
+            conn.close()
+            return
+        
         # Handle POST
         if method == 'POST':
             body_start = request.find('\r\n\r\n') + 4
@@ -633,8 +776,8 @@ def handle_request(conn, addr):
                 logger.info("Received state: {} (current position: {})".format(state_str, current_arm_position))
                 init_gpio()
                 
-                # Skip if already in this position (except BLOW which toggles)
-                if state_str != 'BLOW' and state_str == current_arm_position:
+                # Skip if already in this position (except BLOW which toggles, and OPEN which needs to check actual motor position)
+                if state_str != 'BLOW' and state_str != 'OPEN' and state_str == current_arm_position:
                     logger.info("Already in {} position - skipping".format(state_str))
                     response_data = json.dumps({'success': True, 'state': state_str, 'fan_running': fan_running, 'skipped': True, 'movement_duration': 0.0})
                     response = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\n\r\n{}".format(len(response_data), response_data)
@@ -658,14 +801,32 @@ def handle_request(conn, addr):
                     target_a = GLOBAL_CONFIG['motorADipPosition']
                     target_b = GLOBAL_CONFIG['motorBDipPosition']
                     movement_duration = move_motors_to_position(target_a, target_b)
-                    logger.info("Dip sequence completed (A: {}, B: {})".format(motor_a_position, motor_b_position))
+                    logger.info("Dip sequence started - moving to target (A: {}, B: {}), duration: {:.2f}s".format(target_a, target_b, movement_duration))
                 
                 elif state_str == 'OPEN':
                     current_arm_position = 'OPEN'  # Set immediately to prevent double-clicks
-                    # OPEN and HOME are the same - move to home position (0, 0) with slow-in
-                    # Start slow-in at 250 steps (about 2 seconds longer with gradual deceleration)
-                    movement_duration = move_motors_to_position(0, 0, use_slow_in=True, slow_in_start_distance=250)
-                    logger.info("Arms opened to home (A: 0, B: 0) with slow-in")
+                    # OPEN/HOME always goes to (0, 0) - home position
+                    target_a = 0
+                    target_b = 0
+                    
+                    # Check if already at home position
+                    with motor_position_lock:
+                        current_a = motor_a_position
+                        current_b = motor_b_position
+                    
+                    tolerance = 10  # Allow small tolerance
+                    logger.info("OPEN command: Current position A={}, B={}, target=(0, 0)".format(current_a, current_b))
+                    if abs(current_a) < tolerance and abs(current_b) < tolerance:
+                        logger.info("Already at OPEN position (A: {}, B: {}), skipping movement".format(current_a, current_b))
+                        movement_duration = 0.0
+                    else:
+                        # Move to home position (0, 0) with slow-in
+                        # Use force=True to interrupt any ongoing movement (for cleanup scenarios)
+                        # IMPORTANT: After waiting for previous movement, re-read position to ensure accuracy
+                        # Start slow-in at 250 steps (about 2 seconds longer with gradual deceleration)
+                        logger.info("Calling move_motors_to_position with force=True, current tracked position: A={}, B={}".format(current_a, current_b))
+                        movement_duration = move_motors_to_position(0, 0, use_slow_in=True, slow_in_start_distance=250, force=True)
+                        logger.info("Arms opened to home (A: 0, B: 0) with slow-in, movement duration: {:.2f}s".format(movement_duration))
                 
                 elif state_str == 'BLOW':
                     # Ensure fan is enabled and initialized
@@ -714,10 +875,11 @@ def handle_request(conn, addr):
                     logger.info("CLOSE state: Using target positions from GLOBAL_CONFIG: A={}, B={}".format(target_a, target_b))
                     # Apply slow-out (slow start) for CLOSE movement - start slow, then speed up
                     movement_duration = move_motors_to_position(target_a, target_b, use_slow_out=True, slow_out_start_distance=250)
-                    if fan_pwm:
-                        fan_pwm.ChangeDutyCycle(0)
-                        fan_running = False
-                    logger.info("Arms closed (A: {}, B: {}) with slow-out".format(motor_a_position, motor_b_position))
+                    # NOTE: Fan control should be handled by timeline blocks, not by motor states
+                    # Removing automatic fan stop on CLOSE - let timeline control fan
+                    if fan_pwm and fan_running:
+                        logger.warning("CLOSE state: Fan is running (fan_running={}), but NOT stopping it - fan should be controlled by timeline blocks".format(fan_running))
+                    logger.info("Arms closed - moving to target (A: {}, B: {}) with slow-out, duration: {:.2f}s".format(target_a, target_b, movement_duration))
                 
                 elif state_str == 'HOME':
                     current_arm_position = 'HOME'  # Set immediately to prevent double-clicks
@@ -737,7 +899,31 @@ def handle_request(conn, addr):
             
             elif parsed_path.path == '/update_config' or parsed_path.path == '/set_config':
                 logger.info("Received config update: {}".format(post_data))
-                GLOBAL_CONFIG.update(post_data)
+                # Update only the keys that are provided, preserving existing values
+                # This ensures motor positions aren't lost if not included in the update
+                for key, value in post_data.items():
+                    GLOBAL_CONFIG[key] = value
+                
+                # Ensure motor positions exist (fallback to defaults if missing)
+                if 'motorADipPosition' not in GLOBAL_CONFIG:
+                    GLOBAL_CONFIG['motorADipPosition'] = DEFAULT_CONFIG['motorADipPosition']
+                if 'motorBDipPosition' not in GLOBAL_CONFIG:
+                    GLOBAL_CONFIG['motorBDipPosition'] = DEFAULT_CONFIG['motorBDipPosition']
+                if 'motorAClosePosition' not in GLOBAL_CONFIG:
+                    GLOBAL_CONFIG['motorAClosePosition'] = DEFAULT_CONFIG['motorAClosePosition']
+                if 'motorBClosePosition' not in GLOBAL_CONFIG:
+                    GLOBAL_CONFIG['motorBClosePosition'] = DEFAULT_CONFIG['motorBClosePosition']
+                if 'motorAOpenPosition' not in GLOBAL_CONFIG:
+                    GLOBAL_CONFIG['motorAOpenPosition'] = DEFAULT_CONFIG['motorAOpenPosition']
+                if 'motorBOpenPosition' not in GLOBAL_CONFIG:
+                    GLOBAL_CONFIG['motorBOpenPosition'] = DEFAULT_CONFIG['motorBOpenPosition']
+                
+                logger.info("Config updated - Motor positions: DIP(A={}, B={}), CLOSE(A={}, B={})".format(
+                    GLOBAL_CONFIG.get('motorADipPosition', 200),
+                    GLOBAL_CONFIG.get('motorBDipPosition', -200),
+                    GLOBAL_CONFIG.get('motorAClosePosition', 200),
+                    GLOBAL_CONFIG.get('motorBClosePosition', -200)
+                ))
                 
                 # Save config to file for persistence
                 save_config()
@@ -746,6 +932,7 @@ def handle_request(conn, addr):
                 init_gpio()
                 
                 # Handle fan enabled/disabled toggle
+                fan_should_start = False
                 if 'fanEnabled' in post_data:
                     if GLOBAL_CONFIG['fanEnabled']:
                         # Fan enabled: initialize PWM if not already done
@@ -757,7 +944,9 @@ def handle_request(conn, addr):
                                 logger.info("Fan PWM initialized at 1kHz (enabled via config update)")
                             except Exception as e:
                                 logger.error("Failed to initialize fan PWM: {}".format(e))
-                        # Don't auto-start fan, just initialize PWM
+                        # If fanSpeed is also being set in this update, start the fan
+                        if 'fanSpeed' in post_data:
+                            fan_should_start = True
                     else:
                         # Fan disabled: stop fan if running
                         if fan_pwm and fan_running:
@@ -770,22 +959,38 @@ def handle_request(conn, addr):
                         GPIO.setup(PINS['pwmFan'], GPIO.OUT)
                         fan_pwm = GPIO.PWM(PINS['pwmFan'], 1000)  # 1kHz
                         fan_pwm.start(0)
-                        logger.info("Fan PWM initialized at 1kHz (enabled via config update)")
+                        logger.info("Fan PWM initialized at 1kHz (lazy init)")
                     except Exception as e:
                         logger.error("Failed to initialize fan PWM: {}".format(e))
                 
-                # Update fan speed if running (or if just fanSpeed was updated)
+                # Update fan speed and start/stop fan
                 if fan_pwm and 'fanSpeed' in post_data:
-                    if fan_running:
-                        # Fan is running, update speed immediately
-                        try:
-                            slider_speed = float(GLOBAL_CONFIG['fanSpeed'])
-                            duty_cycle = map_fan_speed(slider_speed)
+                    try:
+                        slider_speed = float(GLOBAL_CONFIG['fanSpeed'])
+                        duty_cycle = map_fan_speed(slider_speed)
+                        if fan_should_start:
+                            # Start fan at specified speed (from timeline fan start block)
+                            # Give a brief kick to 100% to help it start faster, then set target speed
+                            if duty_cycle > 0:
+                                fan_pwm.ChangeDutyCycle(100)  # Brief kick to full speed for faster startup
+                                time.sleep(0.1)  # 100ms kick to ensure fan starts spinning
+                            fan_pwm.ChangeDutyCycle(duty_cycle)
+                            fan_running = True
+                            logger.info("Fan started at {}% PWM (from timeline, with quick start kick)".format(duty_cycle))
+                        elif fan_running:
+                            # Fan is running, update speed immediately
                             fan_pwm.ChangeDutyCycle(duty_cycle)
                             logger.info("Fan speed updated to {}% PWM".format(duty_cycle))
-                        except Exception as e:
-                            logger.error("Failed to update fan speed: {}".format(e))
-                    # If fan not running, speed is saved in config for next time it starts
+                        # If fan not running and not starting, speed is saved in config for next time
+                    except Exception as e:
+                        logger.error("Failed to update fan speed: {}".format(e))
+                
+                # Handle explicit fan stop (fanEnabled: false with fanSpeed: 0 or just fanEnabled: false)
+                if 'fanEnabled' in post_data and not GLOBAL_CONFIG['fanEnabled']:
+                    if fan_pwm and fan_running:
+                        fan_pwm.ChangeDutyCycle(0)
+                        fan_running = False
+                        logger.info("Fan stopped (fanEnabled set to false)")
                 
                 response_data = json.dumps({'success': True, 'config': GLOBAL_CONFIG, 'fan_running': fan_running})
                 response = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\n\r\n{}".format(len(response_data), response_data)

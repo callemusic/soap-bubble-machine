@@ -151,60 +151,6 @@ const ControlPanel: React.FC<ControlPanelProps> = ({
           {isRunning ? <><Square size={18} fill="currentColor" /> STOP SEQUENCE</> : <><Play size={18} fill="currentColor" /> START LOOP</>}
         </button>
 
-        {/* Loop Wait Times */}
-        <div className="col-span-2 space-y-3 mt-2 p-3 bg-slate-950 border border-slate-800 rounded">
-          <h4 className="text-xs font-semibold text-slate-400 uppercase tracking-tighter">Loop Wait Times</h4>
-          <div className="space-y-3">
-            <div>
-              <div className="flex justify-between text-xs text-slate-400 mb-1">
-                <span>Open → Close</span>
-                <span className="text-blue-400 font-mono">{config.waitAfterOpen}s</span>
-              </div>
-              <input 
-                type="range" 
-                min="0" 
-                max="10" 
-                step="0.1"
-                value={config.waitAfterOpen} 
-                onChange={(e) => handleConfigChange('waitAfterOpen', e.target.value)}
-                className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-blue-500"
-              />
-            </div>
-            
-            <div>
-              <div className="flex justify-between text-xs text-slate-400 mb-1">
-                <span>Close → Dip</span>
-                <span className="text-blue-400 font-mono">{config.waitAfterClose}s</span>
-              </div>
-              <input 
-                type="range" 
-                min="0" 
-                max="10" 
-                step="0.1"
-                value={config.waitAfterClose} 
-                onChange={(e) => handleConfigChange('waitAfterClose', e.target.value)}
-                className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-blue-500"
-              />
-            </div>
-            
-            <div>
-              <div className="flex justify-between text-xs text-slate-400 mb-1">
-                <span>Dip → Open</span>
-                <span className="text-blue-400 font-mono">{config.waitAfterDip}s</span>
-              </div>
-              <input 
-                type="range" 
-                min="0" 
-                max="10" 
-                step="0.1"
-                value={config.waitAfterDip} 
-                onChange={(e) => handleConfigChange('waitAfterDip', e.target.value)}
-                className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-blue-500"
-              />
-            </div>
-          </div>
-        </div>
-
         <div className="text-xs text-slate-500 col-span-2 text-center my-2 border-b border-slate-800 leading-[0.1em]">
           <span className="bg-slate-900 px-2 uppercase tracking-widest font-bold">Manual Overrides</span>
         </div>
